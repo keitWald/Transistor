@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/d/Transistor/wheel-leg/software/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

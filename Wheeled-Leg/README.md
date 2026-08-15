@@ -1,0 +1,6 @@
+# Transistor-Wheeled-Legged-Robot
+此仓库是北航Transistor战队轮腿机器人相关代码
+
+software文件夹下是轮腿机器人底盘的嵌入式控制代码
+
+simulation是matlab代码

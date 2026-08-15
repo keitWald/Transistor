@@ -1,0 +1,3 @@
+/d/Transistor/wheel-leg/software/build/CMakeFiles/LegWheel.dir
+/d/Transistor/wheel-leg/software/build/CMakeFiles/edit_cache.dir
+/d/Transistor/wheel-leg/software/build/CMakeFiles/rebuild_cache.dir

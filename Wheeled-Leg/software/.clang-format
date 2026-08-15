@@ -1,0 +1,40 @@
+---
+# 语言: C++
+Language:        Cpp
+# 基于 Google 风格
+BasedOnStyle:  Google
+
+# 缩进宽度: 4个空格 (STM32/ROS2 常用 4 空格，Google 默认是 2)
+IndentWidth:     4
+# 连续行的缩进宽度
+ContinuationIndentWidth: 4
+
+# 指针和引用的对齐方式: Left (int* a), Right (int *a), Middle (int * a)
+# 嵌入式通常习惯 Right (int *a)
+PointerAlignment: Right
+
+# 允许短的函数放在同一行 (例如: int get() { return 0; })
+AllowShortFunctionsOnASingleLine: Inline
+
+# 每行字符限制 (超过这个长度自动换行)
+ColumnLimit:     120
+
+# include 头文件排序 (按字母顺序自动重排)
+SortIncludes:    true
+
+# switch 语句的 case 缩进
+IndentCaseLabels: true
+
+# 宏定义的缩进
+IndentPPDirectives: BeforeHash
+
+# 大括号换行风格: Attach (不换行), Linux (换行)
+# Attach:
+# void foo() {
+# }
+# Linux:
+# void foo()
+# {
+# }
+BreakBeforeBraces: Attach
+...

@@ -1,0 +1,20 @@
+{
+    "files.associations": {
+        "bsp_fdcan.h": "c",
+        "fdcan.h": "c",
+        "chassis.h": "c",
+        "dm_8009p.h": "c",
+        "m3508.h": "c",
+        "tpid.h": "c",
+        "bsp_uart.h": "c",
+        "cmath": "c",
+        "cstdlib": "c",
+        "__nullptr": "cpp",
+        "type_traits": "cpp",
+        "typeinfo": "cpp",
+        "sbus.h": "c",
+        "main.h": "c",
+        "vofa.h": "c"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
+}

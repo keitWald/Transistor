@@ -1,0 +1,54 @@
+-xc++
+-std=c++14
+--target=arm-none-eabi
+-mcpu=cortex-m7
+-mfpu=fpv5-d16
+-mfloat-abi=hard
+-DSTM32H723xx
+-DUSE_HAL_DRIVER
+-D__MICROLIB
+
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Core\Inc
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\STM32H7xx_HAL_Driver\Inc
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\STM32H7xx_HAL_Driver\Inc\Legacy
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Middlewares\Third_Party\FreeRTOS\Source\include
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Middlewares\Third_Party\FreeRTOS\Source\CMSIS_RTOS_V2
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Middlewares\Third_Party\FreeRTOS\Source\portable\RVDS\ARM_CM4F
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\CMSIS\Device\ST\STM32H7xx\Include
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\CMSIS\Include
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\WS2812
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Bsp\UART
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\IBUS
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Applications
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Algorithm
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Bsp\DWT
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Algorithm\inc
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\IMU
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\CMSIS\DSP
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\Saber_C3
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\M1505B
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Bsp\CAN
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Middlewares\ST\ARM\DSP\Inc
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\SBUS
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\M6020
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\DM8009P
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\M3508
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\tpid
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\VOFA+
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\N100
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\dji_motor
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\GM6020
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\M2006
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\XRobot_IMU
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Devices\DM_IMU
+-ID:\keil5 MDK\ARM\ARMCLANG\include
+-ID:\keil5 MDK\ARM\ARMCLANG\include\arm_linux
+-ID:\keil5 MDK\ARM\ARMCLANG\include\arm_linux_compat
+-ID:\keil5 MDK\ARM\ARMCLANG\include\libcxx
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\MDK-ARM
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Core\Src
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\STM32H7xx_HAL_Driver\Src
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Middlewares\Third_Party\FreeRTOS\Source
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Middlewares\Third_Party\FreeRTOS\Source\portable\MemMang
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Algorithm\src
+-Id:\RM-electro-control\wheelleg\github\Transistor-Wheeled-Legged-Robot\software\Drivers\CMSIS\DSP\Lib\ARM
