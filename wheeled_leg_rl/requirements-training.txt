@@ -1,0 +1,8 @@
+# Isaac Gym Preview 4 must be installed separately from NVIDIA's distribution.
+numpy
+torch
+tensorboard
+matplotlib
+pynput
+onnx
+onnxruntime
