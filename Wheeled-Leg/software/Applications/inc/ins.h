@@ -26,7 +26,10 @@
 #define RAD_2_DEGREE 57.2957795f     // 180/pi
 #define DEGREE_2_RAD 0.01745329252f  // pi/180
 #define STANDARD_GRAVITY 9.80665f    //重力加速度
-#define pitch_bias  0.03f
+// DM IMU is mounted approximately 0.20 m ahead of the chassis yaw axis.
+// Limit compensation to the validated physical yaw-speed range.
+#define INS_IMU_FORWARD_LEVER_ARM_M 0.20f
+#define INS_LEVER_ARM_YAW_RATE_MAX 2.6f
 // IMU source selection (set before build)
 #define INS_IMU_SOURCE_N100 0
 #define INS_IMU_SOURCE_DM_IMU 1
@@ -45,8 +48,8 @@ typedef struct
 {
     float q[4];  // 四元数估计值
 
-    float Gyro[3];  // 角速度
-    float Accel[3];          // 加速度
+    float Gyro[3];           // X/Y/Z angular rate, rad/s
+    float Accel[3];          // acceleration, m/s^2
     float MotionAccel_b[3];  // 机体坐标加速度
     float MotionAccel_n[3];  // 绝对系加速度
 
@@ -60,11 +63,11 @@ typedef struct
     float atanyz;
 
     // 位姿
-    float Roll;
-    float Pitch;
-    float Yaw;
+    float Roll;              // rad
+    float Pitch;             // rad
+    float Yaw;               // rad
     float YawTotalAngle;
-    float YawSpeed;
+    float YawSpeed;          // rad/s, same unit as Gyro[Z]
     float time;
 
     float flag;
@@ -89,6 +92,12 @@ void QuaternionToEularAngle(float *q, float *Yaw, float *Pitch, float *Roll);
 void EularAngleToQuaternion(float Yaw, float Pitch, float Roll, float *q);
 void BodyFrameToEarthFrame(const float *vecBF, float *vecEF, float *q);
 void EarthFrameToBodyFrame(const float *vecEF, float *vecBF,  const float* q);
+// Remove the direction-even centripetal-acceleration attitude error caused by
+// a signed horizontal IMU offset from the yaw axis. Angles/rates are radians.
+float INS_CompensatePitchYawLeverArm(float raw_pitch, float yaw_rate,
+                                    float forward_offset_m);
+float INS_CompensateRollYawLeverArm(float raw_roll, float yaw_rate,
+                                   float lateral_offset_m);
 
 #endif
 

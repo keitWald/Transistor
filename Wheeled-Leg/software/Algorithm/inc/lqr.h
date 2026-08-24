@@ -60,17 +60,46 @@ class Lqr {
 	void SetRotation(const float _rotation){target_rotation_=_rotation;};
   void SetWRotation(const float _w_rotation){target_w_rotation_=_w_rotation;};
   void SetPitchGainScale(const float scale) { pitch_gain_scale_ = scale; }
+  // Scale only the body-rate part of the fitted rate feedback. w_theta is a
+  // mixed state (phi0_rate + body_rate), so scaling the complete LQR columns
+  // would incorrectly remove the established joint-rate damping.
+  void SetBodyRateGainScale(const float scale) {
+    body_rate_gain_scale_ = scale;
+  }
   void SetPitchTarget(const float target) { pitch_target_ = target; }
   float GetWheelTorL() { return U_[0]; };
 	float GetWheelTorR() { return U_[1]; };
   float GetLegTorL() { return U_[2]; };
   float GetLegTorR() { return U_[3]; };
+  float GetCommonWheelSpeedContribution() {
+    return common_wheel_speed_contribution_;
+  }
+  float GetCommonWheelLegContribution() {
+    return common_wheel_leg_contribution_;
+  }
+  float GetCommonWheelLegAngleContribution() {
+    return common_wheel_leg_angle_contribution_;
+  }
+  float GetCommonWheelLegRateContribution() {
+    return common_wheel_leg_rate_contribution_;
+  }
+  float GetCommonWheelPitchContribution() {
+    return common_wheel_pitch_contribution_;
+  }
+  float GetRawCommonWheelTorque() { return raw_common_wheel_torque_; }
   float LimitOutput(float _u, float _max);
  private:
   float dist_, speed_,rotation_, w_rotation_, theta_l_, w_theta_l_,theta_r_,w_theta_r_,body_,w_body_, leg_len_l_,leg_len_r_;
   float target_speed_, speed_bias_, target_dist_, target_rotation_,target_w_rotation_,F_N_L_,F_N_R_, T_[4], T_K_[4][10], error[10], U_[4];
   float pitch_gain_scale_;
+  float body_rate_gain_scale_ = 1.0f;
   float pitch_target_ = 0.0f;
+  float common_wheel_speed_contribution_ = 0.0f;
+  float common_wheel_leg_contribution_ = 0.0f;
+  float common_wheel_leg_angle_contribution_ = 0.0f;
+  float common_wheel_leg_rate_contribution_ = 0.0f;
+  float common_wheel_pitch_contribution_ = 0.0f;
+  float raw_common_wheel_torque_ = 0.0f;
   bool off_ground_;
   LqrGains lqr_gains_calculator_;
 };

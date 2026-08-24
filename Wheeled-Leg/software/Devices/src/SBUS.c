@@ -44,6 +44,13 @@ static volatile uint8_t sbus_rx_completed =
 static uint8_t dma_rx_buf[25]; // 缓冲区1: DMA硬件接收专用
 static uint8_t sbus_decode_buf[25]; // 缓冲区2: 主循环解码专用
 static volatile uint32_t sbus_last_frame_tick = 0; // 最后有效遥控帧时间戳(ms)，失控保护用
+// A switch position must be repeated by two complete SBUS frames before it is
+// published. SBUS has no payload CRC; an impact-corrupted frame can retain a
+// valid header/footer while decoding SA into another position. The mapper's
+// value 0 is not a physical SA position and is therefore never published.
+static uint8_t status_candidate = 0U;
+static uint8_t status_candidate_count = 0U;
+static const uint8_t STATUS_CONFIRM_FRAMES = 2U;
 
 /* Public Variables ----------------------------------------------------------*/
 
@@ -90,6 +97,8 @@ static float map_to_3levels(int16_t sbus_val) {
 void SBUS_Init(UART_HandleTypeDef *huart) {
   sbus_huart = huart;
   sbus_last_frame_tick = HAL_GetTick();
+  status_candidate = 0U;
+  status_candidate_count = 0U;
   // 启动DMA接收，数据目标是dma_rx_buf
   SBUS_Open();
 }
@@ -131,9 +140,17 @@ void SBUS_RX_Callback_Handler(uint16_t size) {
     return;
   }
   const uint8_t footer = dma_rx_buf[24];
+  const uint8_t flags = dma_rx_buf[23];
   const uint8_t footer_valid =
       (footer == 0x00U) || ((footer & 0x0FU) == 0x04U);
-  if (dma_rx_buf[0] != 0x0FU || !footer_valid) {
+  // SBUS flags byte: bit 2 = frame lost, bit 3 = failsafe active.  Receivers
+  // may continue emitting structurally valid frames during a short impact
+  // dropout, with their configured failsafe switch positions in the channel
+  // payload.  Never publish those positions as operator commands and do not
+  // refresh the valid-frame timestamp; a persistent dropout is still handled
+  // by the existing 100 ms SBUS link-loss ESTOP.
+  const uint8_t receiver_frame_invalid = (uint8_t)(flags & 0x0CU);
+  if (dma_rx_buf[0] != 0x0FU || !footer_valid || receiver_frame_invalid != 0U) {
     return;
   }
   // 将DMA接收缓冲区的数据安全地复制到解码缓冲区
@@ -244,8 +261,32 @@ void SBUS_Handle(void) {
       sbus_rx_data.torque = ramp_control.torque_current;
       // 处理挡位开关通道
       sbus_rx_data.jump_flag = map_to_2levels(sbus_raw.ch[9]);
-      sbus_rx_data.status_flag = map_to_3levels(sbus_raw.ch[4]);
+      const uint8_t decoded_status =
+          (uint8_t)map_to_3levels(sbus_raw.ch[4]);
+      if (decoded_status == 0U) {
+        // Between calibrated switch detents, or a malformed channel sample:
+        // retain the last confirmed command instead of publishing ESTOP.
+        status_candidate = 0U;
+        status_candidate_count = 0U;
+      } else if (decoded_status == (uint8_t)sbus_rx_data.status_flag) {
+        status_candidate = 0U;
+        status_candidate_count = 0U;
+      } else {
+        if (status_candidate == decoded_status) {
+          if (status_candidate_count < STATUS_CONFIRM_FRAMES)
+            status_candidate_count++;
+        } else {
+          status_candidate = decoded_status;
+          status_candidate_count = 1U;
+        }
+        if (status_candidate_count >= STATUS_CONFIRM_FRAMES) {
+          sbus_rx_data.status_flag = (float)decoded_status;
+          status_candidate = 0U;
+          status_candidate_count = 0U;
+        }
+      }
       sbus_rx_data.reset_flag = map_to_2levels(sbus_raw.ch[11]);
+      sbus_rx_data.step_up_flag = map_to_2levels(sbus_raw.ch[10]); // 上台阶使能开关（SG）
     }
   }
 }

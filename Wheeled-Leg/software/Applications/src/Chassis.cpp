@@ -21,8 +21,8 @@ const float k_rb_joint_bias = 2.9341;
 
 const float k_jump_force = 250.0f;
 const float k_jump_time = 0.1f;
-const float k_retract_fast_force = -230.0f;
-const float k_retract_near_force = -190.0f;
+const float k_retract_fast_force = -250.0f;
+const float k_retract_near_force = -200.0f;
 const float k_retract_near_length = 0.25f;
 const float k_retract_time = 0.15f;
 
@@ -64,6 +64,18 @@ float SlewTowards(float current, float target, float max_step) {
   return target;
 }
 
+float CalculateLandingImpedanceForce(
+    float length_ref, float length, float length_speed, float gravity_ff,
+    float kp, float kd, float force_min, float force_max, float soft_limit,
+    float soft_stop_kp, float soft_stop_kd, bool contact) {
+  float force = kp * (length_ref - length) - kd * length_speed + gravity_ff;
+  if (contact && length < soft_limit && length_speed < 0.0f) {
+    force += soft_stop_kp * (soft_limit - length) -
+             soft_stop_kd * length_speed;
+  }
+  return ClampRange(force, force_min, force_max);
+}
+
 } // namespace
 
 balance_Chassis chassis;
@@ -89,10 +101,7 @@ void balance_Chassis::MotorInit() {
   //   lb_joint_.Save_Pos_Zero();
   //  rf_joint_.Save_Pos_Zero();
   //  rb_joint_.Save_Pos_Zero();
-  lf_joint_.Enable();
-  lb_joint_.Enable();
-  rf_joint_.Enable();
-  rb_joint_.Enable();
+  EnableAllJointMotors();
 }
 /**
  * @brief 底盘状态初始化
@@ -101,6 +110,9 @@ void balance_Chassis::MotorInit() {
  * @param
  */
 void balance_Chassis::StatusInit() {
+  ResetLeso();
+  ResetRollLeso();
+  ResetPitchLeso();
   dist_ = 0;
   dist_m_ = 0.0f;
   target_dist_ = 0;
@@ -112,10 +124,16 @@ void balance_Chassis::StatusInit() {
   yaw_command_active_ = false;
   normal_pivot_yaw_rate_ref_ = 0.0f;
   normal_pivot_yaw_torque_cmd_ = 0.0f;
+  normal_translation_wheel_sync_torque_ = 0.0f;
   normal_pivot_center_trim_torque_ = 0.0f;
   normal_pivot_center_prev_speed_ = 0.0f;
   normal_zero_speed_trim_torque_ = 0.0f;
+  normal_zero_speed_prev_speed_ = 0.0f;
+  normal_zero_speed_integral_delay_count_ = 0U;
+  normal_zero_speed_correction_ = 0.0f;
+  normal_lqr_wheel_common_torque_ = 0.0f;
   normal_speed_ref_ = 0.0f;
+  normal_speed_ref_rate_ = 0.0f;
   normal_wheel_center_speed_ = 0.0f;
   normal_wheel_diff_speed_ = 0.0f;
   normal_pivot_leg_sync_force_ = 0.0f;
@@ -134,6 +152,16 @@ void balance_Chassis::StatusInit() {
   roll_len_delta_cmd_ = 0.0f;
   off_ground_enter_count_ = 0;
   off_ground_exit_count_ = 0;
+  normal_airborne_seen_ = false;
+  normal_touchdown_active_ = false;
+  normal_touchdown_left_contact_ = false;
+  normal_touchdown_right_contact_ = false;
+  normal_touchdown_left_contact_count_ = 0U;
+  normal_touchdown_right_contact_count_ = 0U;
+  normal_touchdown_timer_ = 0U;
+  normal_touchdown_stable_count_ = 0U;
+  normal_touchdown_ref_l_ = OFF_GROUND_LEG_LENGTH;
+  normal_touchdown_ref_r_ = OFF_GROUND_LEG_LENGTH;
   // --- 状态机初始化 ---
 #if CHASSIS_JOINT_DEBUG_ENABLE && !CHASSIS_TEACH_ENABLE
   robot_status = STATE_JOINT_DEBUG;
@@ -155,22 +183,50 @@ void balance_Chassis::StatusInit() {
   jump_length_ready_count_ = 0;
   jump_retract_hold_count_ = 0;
   jump_landing_ready_count_ = 0;
+  jump_landing_pitch_ready_count_ = 0;
+  jump_airborne_confirm_count_ = 0;
+  jump_extend_ready_l_ = false;
+  jump_extend_ready_r_ = false;
+  jump_airborne_confirmed_ = false;
+  jump_landing_pitch_ready_ = false;
   jump_normal_handoff_count_ = 0;
+  normal_airborne_wheel_control_active_ = false;
+  normal_airborne_wheel_ref_l_ = 0.0f;
+  normal_airborne_wheel_ref_r_ = 0.0f;
+  normal_airborne_wheel_integral_l_ = 0.0f;
+  normal_airborne_wheel_integral_r_ = 0.0f;
+  normal_airborne_pitch_ref_integral_ = 0.0f;
+  normal_airborne_forward_speed_ref_ = 0.0f;
+  normal_airborne_theta_ref_ = 0.0f;
   jump_wheel_integral_l_ = 0.0f;
   jump_wheel_integral_r_ = 0.0f;
+  jump_wheel_pitch_ref_integral_ = 0.0f;
   jump_wheel_speed_ref_l_ = 0.0f;
   jump_wheel_speed_ref_r_ = 0.0f;
   jump_active_wheel_ref_l_ = 0.0f;
   jump_active_wheel_ref_r_ = 0.0f;
+  jump_airborne_forward_speed_ref_ = 0.0f;
+  jump_airborne_theta_ref_ = 0.0f;
   jump_landing_speed_scale_ = 1.0f;
   jump_land_phi0_ref_l_ = 0.0f;
   jump_land_phi0_ref_r_ = 0.0f;
   jump_landing_brake_ref_l_ = 0.0f;
   jump_landing_brake_ref_r_ = 0.0f;
+  jump_land_deploy_ref_ = JUMP_RETRACT_LENGTH;
+  jump_touchdown_ref_l_ = JUMP_LAND_PREP_LENGTH;
+  jump_touchdown_ref_r_ = JUMP_LAND_PREP_LENGTH;
   jump_left_contact_count_ = jump_right_contact_count_ = 0U;
   jump_left_release_count_ = jump_right_release_count_ = 0U;
+  jump_left_blocked_count_ = jump_right_blocked_count_ = 0U;
+  dm_auto_enable_wait_count_ = 0U;
+  dm_auto_enable_cooldown_count_ = 0U;
+  dm_auto_enable_attempts_ = 0U;
+  dm_auto_enable_pending_ = false;
   jump_left_contact_ = jump_right_contact_ = false;
+  jump_left_blocked_contact_ = jump_right_blocked_contact_ = false;
   jump_both_contact_latched_ = false;
+  jump_touchdown_capture_l_ = false;
+  jump_touchdown_capture_r_ = false;
   jump_landing_zero_cross_l_ = false;
   jump_landing_zero_cross_r_ = false;
   jump_pitch_integral_ = 0.0f;
@@ -455,19 +511,35 @@ void balance_Chassis::ResetJumpState() {
   jump_length_ready_count_ = 0;
   jump_retract_hold_count_ = 0;
   jump_landing_ready_count_ = 0;
+  jump_landing_pitch_ready_count_ = 0;
+  jump_airborne_confirm_count_ = 0;
+  jump_extend_ready_l_ = false;
+  jump_extend_ready_r_ = false;
+  jump_airborne_confirmed_ = false;
+  jump_landing_pitch_ready_ = false;
   jump_wheel_integral_l_ = 0.0f;
   jump_wheel_integral_r_ = 0.0f;
+  jump_wheel_pitch_ref_integral_ = 0.0f;
   jump_active_wheel_ref_l_ = 0.0f;
   jump_active_wheel_ref_r_ = 0.0f;
+  jump_airborne_forward_speed_ref_ = 0.0f;
+  jump_airborne_theta_ref_ = 0.0f;
   jump_landing_speed_scale_ = 1.0f;
   jump_land_phi0_ref_l_ = 0.0f;
   jump_land_phi0_ref_r_ = 0.0f;
   jump_landing_brake_ref_l_ = 0.0f;
   jump_landing_brake_ref_r_ = 0.0f;
+  jump_land_deploy_ref_ = JUMP_RETRACT_LENGTH;
+  jump_touchdown_ref_l_ = JUMP_LAND_PREP_LENGTH;
+  jump_touchdown_ref_r_ = JUMP_LAND_PREP_LENGTH;
   jump_left_contact_count_ = jump_right_contact_count_ = 0U;
   jump_left_release_count_ = jump_right_release_count_ = 0U;
+  jump_left_blocked_count_ = jump_right_blocked_count_ = 0U;
   jump_left_contact_ = jump_right_contact_ = false;
+  jump_left_blocked_contact_ = jump_right_blocked_contact_ = false;
   jump_both_contact_latched_ = false;
+  jump_touchdown_capture_l_ = false;
+  jump_touchdown_capture_r_ = false;
   jump_landing_zero_cross_l_ = false;
   jump_landing_zero_cross_r_ = false;
   jump_pitch_integral_ = 0.0f;
@@ -485,10 +557,35 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
   if (robot_status == new_state) {
     return;
   }
+  // The observer model is valid only for steady, grounded NORMAL operation.
+  // Never carry an input-disturbance estimate across a hybrid-state change.
+  ResetLeso();
+  ResetRollLeso();
+  ResetPitchLeso();
+  // Terrain geometry belongs exclusively to grounded NORMAL. Clear its
+  // filtered leg-length command on every state edge so it cannot enter
+  // RECOVER, JUMP or the next NORMAL hand-off.
+  roll_len_delta_cmd_ = 0.0f;
+  normal_translation_wheel_sync_torque_ = 0.0f;
   const RobotStatus previous_state = robot_status;
+  // Preserve the flight result before ResetJumpState() clears the jump-only
+  // latches.  RETRACT may now hand an airborne robot directly to NORMAL, so
+  // that transition must enter NORMAL's off-ground controller immediately
+  // instead of being treated as a grounded post-landing hand-off.
+  const bool previous_jump_airborne =
+      previous_state == STATE_JUMPING &&
+      (jump_airborne_confirmed_ || jump_liftoff_seen_ || GetOffGround());
+  const float previous_left_wheel_speed = left_wheel.Get_Now_Omega();
+  const float previous_right_wheel_speed = right_wheel.Get_Now_Omega();
+  const float previous_jump_forward_speed = jump_airborne_forward_speed_ref_;
+  const float previous_jump_theta_ref = jump_airborne_theta_ref_;
   // 当从跳跃状态切换到其他状态时，会先清除跳跃状态的子状态
   if (robot_status == STATE_JUMPING) {
     ResetJumpState();
+  }
+  // 当从上台阶状态切换到其他状态时，会先清除上台阶状态的子状态
+  if (robot_status == STATE_STEP_UP) {
+    ResetStepUpState();
   }
   robot_status = new_state;
   fall_detect_count_ = 0;
@@ -506,10 +603,7 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
     if (manual_dm_enable) {
       // Exactly one Enable frame per motor on the confirmed ESTOP -> RECOVER
       // edge.  Fault history remains latched and no ClearError is sent.
-      lf_joint_.Enable();
-      lb_joint_.Enable();
-      rf_joint_.Enable();
-      rb_joint_.Enable();
+      EnableAllJointMotors();
     }
     recover_enable_pending_ = manual_dm_enable;
     dm_enable_wait_count_ = 0U;
@@ -525,36 +619,76 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
     warming_counter_ = 0; // 进入急停/倒地状态，重置急停持续计数（全停零力矩）
     DaoDiFlg_ = true;     // 标记为倒地状态
   } else if (new_state == STATE_JUMPING) {
+    // Clear stale diagnostics from a previous operator ESTOP. Any new ESTOP
+    // source will write its own reason before entering STATE_ESTOP.
+    estop_reason_ = 0U;
     jump_status = JUMP_COMPRESS;
     jump_timer = 0;
     jump_length_ready_count_ = 0;
     jump_retract_hold_count_ = 0;
     jump_landing_ready_count_ = 0;
+    jump_landing_pitch_ready_count_ = 0;
+    jump_airborne_confirm_count_ = 0;
+    jump_extend_ready_l_ = false;
+    jump_extend_ready_r_ = false;
+    jump_airborne_confirmed_ = false;
+    jump_landing_pitch_ready_ = false;
     jump_wheel_integral_l_ = 0.0f;
     jump_wheel_integral_r_ = 0.0f;
+    jump_wheel_pitch_ref_integral_ = 0.0f;
     jump_wheel_speed_ref_l_ = 0.0f;
     jump_wheel_speed_ref_r_ = 0.0f;
     jump_active_wheel_ref_l_ = 0.0f;
     jump_active_wheel_ref_r_ = 0.0f;
+    jump_airborne_forward_speed_ref_ = 0.0f;
+    jump_airborne_theta_ref_ = 0.0f;
     jump_landing_speed_scale_ = 1.0f;
     jump_land_phi0_ref_l_ = 0.0f;
     jump_land_phi0_ref_r_ = 0.0f;
     jump_landing_brake_ref_l_ = 0.0f;
     jump_landing_brake_ref_r_ = 0.0f;
+    jump_land_deploy_ref_ = JUMP_RETRACT_LENGTH;
+    jump_touchdown_ref_l_ = JUMP_LAND_PREP_LENGTH;
+    jump_touchdown_ref_r_ = JUMP_LAND_PREP_LENGTH;
     jump_left_contact_count_ = jump_right_contact_count_ = 0U;
     jump_left_release_count_ = jump_right_release_count_ = 0U;
+    jump_left_blocked_count_ = jump_right_blocked_count_ = 0U;
     jump_left_contact_ = jump_right_contact_ = false;
+    jump_left_blocked_contact_ = jump_right_blocked_contact_ = false;
     jump_both_contact_latched_ = false;
+    jump_touchdown_capture_l_ = false;
+    jump_touchdown_capture_r_ = false;
     jump_landing_zero_cross_l_ = false;
     jump_landing_zero_cross_r_ = false;
     jump_pitch_integral_ = 0.0f;
     jump_roll_integral_ = 0.0f;
     jump_liftoff_seen_ = false;
     jump_state_ = false;
+  } else if (new_state == STATE_STEP_UP) {
+    // 接近/撞击阶段已并入 NORMAL，撞击触发后进入固定动作（让空间→收腿→展腿）
+    step_up_status = STEP_UP_CLEAR_LEG;
+    step_up_timer = 0;
+    step_up_impact_cnt_ = 0;
+    step_up_state_ = false;        // 进入后清零
+    step_up_wheel_stopped_ = false; // 重置轮速两个一次性触发锁存
+    step_up_wheel_resumed_ = false;
+    // 清除 NORMAL 控制残留
+    normal_speed_ref_ = 0;
+    normal_pivot_yaw_rate_ref_ = 0;
   }
   if (new_state == STATE_NORMAL &&
       (previous_state == STATE_RECOVERING ||
-       previous_state == STATE_JUMPING)) {
+       previous_state == STATE_JUMPING ||
+       previous_state == STATE_STEP_UP)) {
+    estop_reason_ = 0U;
+    normal_airborne_seen_ = false;
+    normal_touchdown_active_ = false;
+    normal_touchdown_left_contact_ = false;
+    normal_touchdown_right_contact_ = false;
+    normal_touchdown_left_contact_count_ = 0U;
+    normal_touchdown_right_contact_count_ = 0U;
+    normal_touchdown_timer_ = 0U;
+    normal_touchdown_stable_count_ = 0U;
     // Start the high-gain normal leg controller from the measured capture
     // length, then ramp toward the operator command without a reference step.
     normal_handoff_active_ = true;
@@ -577,7 +711,12 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
     normal_pivot_center_trim_torque_ = 0.0f;
     normal_pivot_center_prev_speed_ = 0.0f;
     normal_zero_speed_trim_torque_ = 0.0f;
+    normal_zero_speed_prev_speed_ = 0.0f;
+    normal_zero_speed_integral_delay_count_ = 0U;
+    normal_zero_speed_correction_ = 0.0f;
+    normal_lqr_wheel_common_torque_ = 0.0f;
     normal_speed_ref_ = 0.0f;
+    normal_speed_ref_rate_ = 0.0f;
     normal_wheel_center_speed_ = 0.0f;
     normal_wheel_diff_speed_ = 0.0f;
     normal_pivot_leg_sync_force_ = 0.0f;
@@ -587,9 +726,42 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
     normal_pivot_pitch_integral_ = 0.0f;
     normal_pivot_pitch_target_ = 0.0f;
     normal_handoff_leg_grace_count_ = kNormalHandoffLegGraceTicks;
-    jump_normal_handoff_count_ =
-        (previous_state == STATE_JUMPING) ? JUMP_NORMAL_HANDOFF_TICKS : 0U;
+    normal_airborne_wheel_control_active_ = previous_jump_airborne;
+    normal_airborne_wheel_ref_l_ = previous_left_wheel_speed;
+    normal_airborne_wheel_ref_r_ = previous_right_wheel_speed;
+    normal_airborne_wheel_integral_l_ = 0.0f;
+    normal_airborne_wheel_integral_r_ = 0.0f;
+    normal_airborne_pitch_ref_integral_ = 0.0f;
+    normal_airborne_forward_speed_ref_ =
+        previous_jump_airborne ? previous_jump_forward_speed : 0.0f;
+    normal_airborne_theta_ref_ =
+        previous_jump_airborne ? previous_jump_theta_ref : 0.0f;
+    // The 250 ms grounded hand-off is only valid after a real landing.  When
+    // RETRACT finishes in flight, keep the already-confirmed airborne state so
+    // NORMAL immediately selects its off-ground gains and 0.40 m leg target.
+    if (previous_jump_airborne) {
+      off_ground_ = true;
+      off_ground_enter_count_ = 0U;
+      off_ground_exit_count_ = 0U;
+      jump_normal_handoff_count_ = 0U;
+    } else {
+      jump_normal_handoff_count_ =
+          (previous_state == STATE_JUMPING) ? JUMP_NORMAL_HANDOFF_TICKS : 0U;
+      // 非空中交接（STEP_UP 完成 / 落地后的跳跃 / 起身）都处于着地状态，
+      // 清掉过渡动作里可能被拉成 true 的离地标志，避免 NORMAL 用离地增益起步。
+      off_ground_ = false;
+      off_ground_enter_count_ = 0U;
+      off_ground_exit_count_ = 0U;
+    }
   } else if (new_state != STATE_NORMAL) {
+    normal_airborne_seen_ = false;
+    normal_touchdown_active_ = false;
+    normal_touchdown_left_contact_ = false;
+    normal_touchdown_right_contact_ = false;
+    normal_touchdown_left_contact_count_ = 0U;
+    normal_touchdown_right_contact_count_ = 0U;
+    normal_touchdown_timer_ = 0U;
+    normal_touchdown_stable_count_ = 0U;
     normal_handoff_active_ = false;
     heading_initialized_ = false;
     translation_command_active_ = false;
@@ -599,7 +771,12 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
     normal_pivot_center_trim_torque_ = 0.0f;
     normal_pivot_center_prev_speed_ = 0.0f;
     normal_zero_speed_trim_torque_ = 0.0f;
+    normal_zero_speed_prev_speed_ = 0.0f;
+    normal_zero_speed_integral_delay_count_ = 0U;
+    normal_zero_speed_correction_ = 0.0f;
+    normal_lqr_wheel_common_torque_ = 0.0f;
     normal_speed_ref_ = 0.0f;
+    normal_speed_ref_rate_ = 0.0f;
     normal_wheel_center_speed_ = 0.0f;
     normal_wheel_diff_speed_ = 0.0f;
     normal_pivot_leg_sync_force_ = 0.0f;
@@ -610,6 +787,12 @@ void balance_Chassis::ChangeState(RobotStatus new_state) {
     normal_pivot_pitch_target_ = 0.0f;
     normal_handoff_leg_grace_count_ = 0;
     jump_normal_handoff_count_ = 0;
+    normal_airborne_wheel_control_active_ = false;
+    normal_airborne_wheel_integral_l_ = 0.0f;
+    normal_airborne_wheel_integral_r_ = 0.0f;
+    normal_airborne_pitch_ref_integral_ = 0.0f;
+    normal_airborne_forward_speed_ref_ = 0.0f;
+    normal_airborne_theta_ref_ = 0.0f;
     normal_pivot_roll_integral_ = 0.0f;
   }
 }
@@ -671,6 +854,47 @@ void balance_Chassis::UpdateStateMachine() {
   const int status_flag = (int)sbus_rx_data.status_flag;
   const uint8_t jump_flag = (uint8_t)sbus_rx_data.jump_flag;
 
+  // Re-enable all four DM joint drives independently of the chassis state.
+  // This deliberately runs before every early return below, so NORMAL, JUMP,
+  // RECOVER, JOINT_DEBUG and even an operator-requested ESTOP all execute the
+  // same bounded recovery sequence.  ESTOP still commands zero torque.  A
+  // real driver fault is never cleared or hidden.
+  const uint8_t dm_fault_at_entry = GetDmFaultMaskNow();
+  const uint8_t dm_reenable_at_entry =
+      GetDmOfflineMaskNow() | GetDmDisabledMaskNow();
+  if (dm_fault_at_entry == 0U && dm_reenable_at_entry != 0U) {
+    if (dm_auto_enable_pending_) {
+      if (dm_auto_enable_attempts_ < DM_AUTO_REENABLE_MAX_ATTEMPTS &&
+          dm_auto_enable_wait_count_ > 0U &&
+          (dm_auto_enable_wait_count_ % DM_AUTO_REENABLE_RETRY_TICKS) == 0U) {
+        EnableAllJointMotors();
+        dm_auto_enable_attempts_++;
+      }
+      if (dm_auto_enable_wait_count_ < DM_AUTO_REENABLE_WAIT_TICKS) {
+        dm_auto_enable_wait_count_++;
+      } else {
+        // Stop masking the diagnostic after this bounded attempt.  In an
+        // operational state the normal diagnostic path below enters ESTOP;
+        // in ESTOP the motors remain zero-torque.  Retry later so a drive that
+        // becomes receptive after the impact can still be re-enabled.
+        dm_auto_enable_pending_ = false;
+        dm_auto_enable_cooldown_count_ = DM_AUTO_REENABLE_COOLDOWN_TICKS;
+      }
+    } else if (dm_auto_enable_cooldown_count_ > 0U) {
+      dm_auto_enable_cooldown_count_--;
+    } else {
+      EnableAllJointMotors();
+      dm_auto_enable_pending_ = true;
+      dm_auto_enable_wait_count_ = 0U;
+      dm_auto_enable_attempts_ = 1U;
+    }
+  } else {
+    dm_auto_enable_wait_count_ = 0U;
+    dm_auto_enable_cooldown_count_ = 0U;
+    dm_auto_enable_attempts_ = 0U;
+    dm_auto_enable_pending_ = false;
+  }
+
   if (status_flag != 1) {
     recover_request_latched_ = false;
   }
@@ -720,17 +944,23 @@ void balance_Chassis::UpdateStateMachine() {
     last_jump_flag_ = jump_flag;
     return;
   }
-  // Diagnose and latch the original DM condition.  No ClearError/Enable is
-  // issued here, so VOFA preserves the failure scene until the controller is
-  // rebooted.
+  // Diagnose and latch DM failures.  During the bounded, state-independent
+  // Enable sequence above, keep the current controller alive long enough for
+  // fresh feedback to arrive.  A driver fault is never masked.
   const bool waiting_for_manual_enable =
       robot_status == STATE_RECOVERING && recover_enable_pending_;
   const uint8_t dm_fault_now =
       waiting_for_manual_enable ? 0U : GetDmFaultMaskNow();
-  const uint8_t dm_offline_now =
+  const uint8_t dm_offline_raw =
       waiting_for_manual_enable ? 0U : GetDmOfflineMaskNow();
-  const uint8_t dm_disabled_now =
+  const uint8_t dm_disabled_raw =
       waiting_for_manual_enable ? 0U : GetDmDisabledMaskNow();
+  uint8_t dm_offline_now = dm_offline_raw;
+  uint8_t dm_disabled_now = dm_disabled_raw;
+  if (dm_fault_now == 0U && dm_auto_enable_pending_) {
+    dm_offline_now = 0U;
+    dm_disabled_now = 0U;
+  }
   if (dm_fault_now != 0U || dm_offline_now != 0U || dm_disabled_now != 0U) {
     const bool first_dm_event = dm_fault_latched_mask_ == 0U &&
                                 dm_offline_latched_mask_ == 0U &&
@@ -757,15 +987,23 @@ void balance_Chassis::UpdateStateMachine() {
       // Capture each motor's measured speed on the exact 2 -> 1 edge. During
       // extension the jump-only wheel loop holds these values unchanged.
       jump_wheel_speed_ref_l_ = JUMP_ASCEND_WHEEL_SPEED_CAPTURE_SCALE *
-                                left_wheel.Get_Now_Omega();
+                                 left_wheel.Get_Now_Omega();
       jump_wheel_speed_ref_r_ = JUMP_ASCEND_WHEEL_SPEED_CAPTURE_SCALE *
-                                right_wheel.Get_Now_Omega();
+                                 right_wheel.Get_Now_Omega();
+      jump_airborne_forward_speed_ref_ =
+          0.5f * k_wheel_radius *
+          (right_wheel.Get_Now_Omega() - left_wheel.Get_Now_Omega());
+      jump_airborne_theta_ref_ = 0.0f;
       jump_wheel_integral_l_ = 0.0f;
       jump_wheel_integral_r_ = 0.0f;
       jump_status = JUMP_ASCEND;
       jump_timer = 0;
       jump_length_ready_count_ = 0;
       jump_retract_hold_count_ = 0;
+      jump_extend_ready_l_ = false;
+      jump_extend_ready_r_ = false;
+      jump_airborne_confirm_count_ = 0;
+      jump_airborne_confirmed_ = false;
       jump_liftoff_seen_ = false;
     }
     last_jump_flag_ = jump_flag;
@@ -829,7 +1067,19 @@ void balance_Chassis::UpdateStateMachine() {
     return;
   }
 
+  // 上台阶状态：检测是否完成（若未完成，则上台阶动作的保持）
+  if (robot_status == STATE_STEP_UP) {
+    if (IsStepUpComplete()) {
+      // 清理子状态的步骤在 ChangeState 函数里，结束后直接接回普通状态
+      ChangeState(STATE_NORMAL);
+    }
+    return;
+  }
+
   // ====== 以下仅从 STATE_NORMAL 进入 ======
+  if (robot_status != STATE_NORMAL) {
+    return;
+  }
 
   // 正常行驶中确认倒地后自动进入恢复流程；200 个控制周期的去抖可避免
   // 加减速或越障瞬态误触发。
@@ -854,6 +1104,12 @@ void balance_Chassis::UpdateStateMachine() {
 
   if (jump_state_) {
     ChangeState(STATE_JUMPING);
+  }
+
+  // 上台阶触发：使能开关(step_up_flag==2)打开后，撞击检测命中 → 断开 LQR 进入固定动作。
+  // 接近/撞击阶段保持在 NORMAL 下由操作者遥控直行，撞击检测见 IsStepUpImpactDetected()。
+  if (IsStepUpImpactDetected()) {
+    ChangeState(STATE_STEP_UP);
   }
 }
 
@@ -886,6 +1142,13 @@ void balance_Chassis::UpdateCommandByState() {
 
   if (robot_status == STATE_JOINT_DEBUG) {
     SetSpd();
+    return;
+  }
+  //上台阶
+  if (robot_status == STATE_STEP_UP) {
+    target_speed_ = 0.0f;
+    target_w_rotation_ = 0.0f;
+    target_dist_ = 0.0f;
     return;
   }
 
@@ -929,6 +1192,10 @@ void balance_Chassis::ChassissControl() {
     JumpCalc();
     break;
   }
+  case STATE_STEP_UP: {
+    StepUpCalc();
+    break;
+  }
   case STATE_JOINT_DEBUG: {
     JointDebugCalc();
     break;
@@ -944,9 +1211,124 @@ void balance_Chassis::ChassissControl() {
  * @param
  */
 void balance_Chassis::NormalCalc() {
-  const float normal_pitch = INS.Pitch - kNormalPitchZeroOffset;
   const bool jump_landing_handoff = jump_normal_handoff_count_ > 0U;
   const bool normal_grounded = jump_landing_handoff || !GetOffGround();
+
+  // NORMAL step-down landing detector.  Do not reuse this path for jump or
+  // recovery: NormalCalc() is called only in STATE_NORMAL.  Once true flight
+  // has been confirmed, latch each leg independently on its first sustained
+  // load so an edge-first landing cannot switch the still-airborne leg to a
+  // short ground target.
+  if (GetOffGround() && !normal_airborne_seen_ &&
+      !normal_touchdown_active_) {
+    if (!normal_airborne_wheel_control_active_) {
+      // Ordinary NORMAL ledge departure: capture the last ground-referenced
+      // axle speed. A JUMP hand-off already carries the launch speed captured
+      // on the 2 -> 1 edge and must not be overwritten by airborne wheel spin.
+      normal_airborne_forward_speed_ref_ = normal_wheel_center_speed_;
+      normal_airborne_theta_ref_ =
+          0.5f * (left_leg_.GetTheta() + right_leg_.GetTheta());
+    }
+    normal_airborne_seen_ = true;
+    normal_touchdown_left_contact_ = false;
+    normal_touchdown_right_contact_ = false;
+    normal_touchdown_left_contact_count_ = 0U;
+    normal_touchdown_right_contact_count_ = 0U;
+    normal_touchdown_timer_ = 0U;
+    normal_touchdown_stable_count_ = 0U;
+    normal_touchdown_ref_l_ = OFF_GROUND_LEG_LENGTH;
+    normal_touchdown_ref_r_ = OFF_GROUND_LEG_LENGTH;
+  }
+
+  if (normal_airborne_seen_ || normal_touchdown_active_) {
+    const bool left_contact_raw =
+        left_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD;
+    const bool right_contact_raw =
+        right_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD;
+    if (!normal_touchdown_left_contact_) {
+      if (left_contact_raw) {
+        if (normal_touchdown_left_contact_count_ <
+            NORMAL_TOUCHDOWN_CONTACT_CONFIRM_TICKS) {
+          normal_touchdown_left_contact_count_++;
+        }
+        if (normal_touchdown_left_contact_count_ >=
+            NORMAL_TOUCHDOWN_CONTACT_CONFIRM_TICKS) {
+          normal_touchdown_left_contact_ = true;
+          normal_touchdown_ref_l_ = left_leg_.GetLegLen();
+        }
+      } else {
+        normal_touchdown_left_contact_count_ = 0U;
+      }
+    }
+    if (!normal_touchdown_right_contact_) {
+      if (right_contact_raw) {
+        if (normal_touchdown_right_contact_count_ <
+            NORMAL_TOUCHDOWN_CONTACT_CONFIRM_TICKS) {
+          normal_touchdown_right_contact_count_++;
+        }
+        if (normal_touchdown_right_contact_count_ >=
+            NORMAL_TOUCHDOWN_CONTACT_CONFIRM_TICKS) {
+          normal_touchdown_right_contact_ = true;
+          normal_touchdown_ref_r_ = right_leg_.GetLegLen();
+        }
+      } else {
+        normal_touchdown_right_contact_count_ = 0U;
+      }
+    }
+
+    if (!normal_touchdown_active_ &&
+        (normal_touchdown_left_contact_ ||
+         normal_touchdown_right_contact_)) {
+      normal_touchdown_active_ = true;
+      normal_touchdown_timer_ = 0U;
+      normal_touchdown_stable_count_ = 0U;
+      left_leg_len_.Clear();
+      right_leg_len_.Clear();
+    }
+
+    if (normal_touchdown_active_) {
+      if (normal_touchdown_timer_ < NORMAL_TOUCHDOWN_MAX_TICKS)
+        normal_touchdown_timer_++;
+      const bool both_contact = normal_touchdown_left_contact_ &&
+                                normal_touchdown_right_contact_;
+      const bool touchdown_stable =
+          both_contact &&
+          left_leg_.GetLegLen() > NORMAL_TOUCHDOWN_MIN_SAFE_LENGTH &&
+          right_leg_.GetLegLen() > NORMAL_TOUCHDOWN_MIN_SAFE_LENGTH &&
+          fabsf(left_leg_.GetLegSpeed()) < NORMAL_TOUCHDOWN_LEG_SPEED_OK &&
+          fabsf(right_leg_.GetLegSpeed()) < NORMAL_TOUCHDOWN_LEG_SPEED_OK &&
+          fabsf(INS.Gyro[0]) < NORMAL_TOUCHDOWN_BODY_RATE_OK &&
+          fabsf(INS.Gyro[1]) < NORMAL_TOUCHDOWN_BODY_RATE_OK;
+      if (normal_touchdown_timer_ >= NORMAL_TOUCHDOWN_MIN_TICKS &&
+          touchdown_stable) {
+        if (normal_touchdown_stable_count_ <
+            NORMAL_TOUCHDOWN_STABLE_TICKS) {
+          normal_touchdown_stable_count_++;
+        }
+      } else {
+        normal_touchdown_stable_count_ = 0U;
+      }
+
+      const bool touchdown_complete =
+          normal_touchdown_stable_count_ >= NORMAL_TOUCHDOWN_STABLE_TICKS;
+      const bool touchdown_timeout =
+          both_contact &&
+          normal_touchdown_timer_ >= NORMAL_TOUCHDOWN_MAX_TICKS;
+      if (touchdown_complete || touchdown_timeout) {
+        // Resume the ordinary NORMAL controller through its existing measured
+        // length hand-off ramp; never step directly back to the operator's
+        // potentially short target.
+        normal_touchdown_active_ = false;
+        normal_airborne_seen_ = false;
+        normal_handoff_active_ = true;
+        normal_handoff_len_l_ = left_leg_.GetLegLen();
+        normal_handoff_len_r_ = right_leg_.GetLegLen();
+        left_leg_len_.Clear();
+        right_leg_len_.Clear();
+      }
+    }
+  }
+
   float jump_landing_wheel_scale = 1.0f;
   if (jump_landing_handoff) {
     const uint32_t elapsed =
@@ -982,46 +1364,83 @@ void balance_Chassis::NormalCalc() {
   const bool translation_idle =
       fabsf(target_speed_) <= kTranslationCommandDeadband;
   const bool yaw_turn = fabsf(target_w_rotation_) > kYawCommandDeadband;
-  const bool pivot_turn = translation_idle && yaw_turn;
-
-  // A NORMAL in-place turn uses one common length reference. In particular,
-  // do not carry the two independent recovery hand-off references into a pivot:
-  // equal references are the geometric prerequisite for zero body roll.
-  if (pivot_turn) {
-    const float pivot_leg_ref = 0.5f * (left_ref + right_ref);
-    left_ref = pivot_leg_ref;
-    right_ref = pivot_leg_ref;
-  }
+  const bool in_place_yaw = translation_idle && yaw_turn;
+  // Legacy pivot-only branches below are compile-time disabled.  They remain
+  // temporarily in the source for traceability, but can no longer select a
+  // different NORMAL balance law.
+  constexpr bool pivot_turn = false;
+  // LQRCalc() applies the same fixed NORMAL Pitch reference for idle,
+  // translation and yaw. Reuse it in the parallel common-hip Pitch path.
+  const float normal_pitch_target = normal_pivot_pitch_target_;
+  const float normal_pitch = INS.Pitch - normal_pitch_target;
 
   // NORMAL gets its own second-stage command shaper.  The SBUS ramp is shared
   // by every state, so changing it would also change recovery behaviour.  A
   // bounded speed slope here reduces the pitch excursion caused by a sudden
   // translation command.  A pivot always requests exactly zero common speed.
   const float normal_speed_goal = translation_idle ? 0.0f : target_speed_;
-  float normal_speed_step = kNormalSpeedRefAccel * 0.001f;
-  if (controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-    normal_speed_step = kNormalSpeedRefAccel * controller_dt_;
+  const float speed_ref_dt =
+      (controller_dt_ > 0.0f && controller_dt_ < 0.02f) ? controller_dt_
+                                                        : 0.001f;
+  const float speed_ref_error = normal_speed_goal - normal_speed_ref_;
+  const float speed_ref_omega = kNormalSpeedRefNaturalFrequency;
+  const float desired_jerk =
+      speed_ref_omega * speed_ref_omega * speed_ref_error -
+      2.0f * kNormalSpeedRefDampingRatio * speed_ref_omega *
+          normal_speed_ref_rate_;
+  const float limited_jerk =
+      ClampAbs(desired_jerk, kNormalSpeedRefJerkLimit);
+  normal_speed_ref_rate_ += limited_jerk * speed_ref_dt;
+
+  // Preserve the established acceleration/deceleration ceilings. Increasing
+  // the magnitude of a same-sign request uses the acceleration limit; stopping
+  // or reversing uses the larger deceleration limit.
+  const bool increasing_speed_magnitude =
+      normal_speed_goal * normal_speed_ref_ >= 0.0f &&
+      fabsf(normal_speed_goal) > fabsf(normal_speed_ref_);
+  const float speed_ref_rate_limit = increasing_speed_magnitude
+                                         ? kNormalSpeedRefAccel
+                                         : kNormalSpeedRefDecel;
+  normal_speed_ref_rate_ =
+      ClampAbs(normal_speed_ref_rate_, speed_ref_rate_limit);
+  const float previous_speed_ref_error = speed_ref_error;
+  normal_speed_ref_ += normal_speed_ref_rate_ * speed_ref_dt;
+
+  // Snap only at the final crossing to avoid a residual reference-rate tail;
+  // the path up to this point remains continuous and jerk limited.
+  const float next_speed_ref_error = normal_speed_goal - normal_speed_ref_;
+  if (previous_speed_ref_error * next_speed_ref_error <= 0.0f &&
+      fabsf(previous_speed_ref_error) > 0.0f) {
+    normal_speed_ref_ = normal_speed_goal;
+    normal_speed_ref_rate_ = 0.0f;
+  } else if (fabsf(next_speed_ref_error) < 0.001f &&
+             fabsf(normal_speed_ref_rate_) < 0.01f) {
+    normal_speed_ref_ = normal_speed_goal;
+    normal_speed_ref_rate_ = 0.0f;
   }
-  if (fabsf(normal_speed_goal) < fabsf(normal_speed_ref_)) {
-    normal_speed_step *= kNormalSpeedRefDecel / kNormalSpeedRefAccel;
-  }
-  normal_speed_ref_ =
-      SlewTowards(normal_speed_ref_, normal_speed_goal, normal_speed_step);
-  if (pivot_turn) {
-    // An in-place turn has no translational ramp state.  Retaining the tail of
-    // a previous drive command gives LQR a non-zero common-speed request and
-    // moves the instantaneous rotation centre away from the axle midpoint.
-    normal_speed_ref_ = 0.0f;
+  // Smoothly hand the common-wheel channel from the moving LQR target to the
+  // exact-zero midpoint loop. This removes the old torque edge at 0.03 m/s.
+  float normal_zero_speed_blend = 0.0f;
+  if (translation_idle) {
+    const float zero_ref_blend = ClampRange(
+        (kNormalZeroSpeedBlendStartRef - fabsf(normal_speed_ref_)) /
+            (kNormalZeroSpeedBlendStartRef - kNormalZeroSpeedBlendFullRef),
+        0.0f, 1.0f);
+    // The axle-midpoint loop must become stronger, not disappear, when the
+    // measured centre speed drifts during a zero-vx yaw command.  Gate only on
+    // the still-decaying translation reference; once it is zero, retain full
+    // midpoint authority for any measured drift magnitude.
+    normal_zero_speed_blend = zero_ref_blend;
   }
 
-  // The historical positive bias compensates drivetrain drift only while
-  // translating.  Applying it at zero input or during a pivot creates a real
-  // common wheel command and necessarily moves the instantaneous turn centre.
+  // Let the historical positive drivetrain bias follow the already-slewed
+  // speed reference all the way to zero.  Basing this on the raw stick idle
+  // flag made the bias disappear in one control tick while normal_speed_ref_
+  // was still decelerating, which kicked the LQR hip rows during a forward
+  // stop.  A pivot still forces both the reference and bias to exactly zero.
   const float normal_bias_scale =
-      translation_idle
-          ? 0.0f
-          : ClampRange(fabsf(normal_speed_ref_) / kNormalSpeedBiasRampSpeed,
-                       0.0f, 1.0f);
+      ClampRange(fabsf(normal_speed_ref_) / kNormalSpeedBiasRampSpeed, 0.0f,
+                 1.0f);
   const float normal_translation_bias = kNormalSpeedBias * normal_bias_scale;
   const float normal_common_speed_target =
       normal_speed_ref_ + normal_translation_bias;
@@ -1039,13 +1458,19 @@ void balance_Chassis::NormalCalc() {
       0.5f * (encoder_left_speed + encoder_right_speed);
   const float encoder_diff_speed =
       0.5f * (encoder_right_speed - encoder_left_speed);
-  const float center_speed_lpf_alpha =
-      pivot_turn ? kNormalPivotWheelSpeedLpfAlpha : kNormalWheelSpeedLpfAlpha;
+  const float center_speed_lpf_alpha = kNormalWheelSpeedLpfAlpha;
   normal_wheel_center_speed_ +=
       center_speed_lpf_alpha *
       (encoder_center_speed - normal_wheel_center_speed_);
   normal_wheel_diff_speed_ += kNormalWheelSpeedLpfAlpha *
                               (encoder_diff_speed - normal_wheel_diff_speed_);
+  // Keep the same wheel-only yaw controller alive after the reference reaches
+  // zero until measured yaw motion has settled.  This is continuous zero-rate
+  // feedback, not an exit state.
+  const bool yaw_control_active =
+      yaw_turn || fabsf(INS.YawSpeed) > kPivotExitYawRateSettled ||
+      (translation_idle &&
+       fabsf(normal_wheel_diff_speed_) > kPivotExitDiffSpeedSettled);
 
   // 正常模式下，状态函数自己决定腿长参考和腿长前馈。
   // 着地时使用支撑前馈；离地时切到缓冲腿长，并关闭前馈。
@@ -1066,7 +1491,7 @@ void balance_Chassis::NormalCalc() {
       // lateral-inertia feedforward.  The general observer can report a false
       // vel_ while the legs and pitch move; feeding that value into opposite
       // leg forces creates a roll error that grows with yaw rate.
-      if (!pivot_turn) {
+      if (!translation_idle) {
         inertial_ff = mass_eff * (leg_len_mean / (2.0f * LEG_FF_WHEEL_TRACK)) *
                       vel_ * INS.Gyro[2];
       }
@@ -1077,98 +1502,247 @@ void balance_Chassis::NormalCalc() {
     // on I10 as roughly -20..50 N noise.  The IMU gyro is the measured roll
     // rate, so use it directly for damping and filter the final axial-force
     // difference before it reaches VMC.
-    const float roll_kp = pivot_turn ? kNormalPivotRollKp : kNormalRollKp;
-    const float roll_kd = pivot_turn ? kNormalPivotRollKd : kNormalRollKd;
-    const float roll_force_limit =
-        pivot_turn ? kNormalPivotRollForceMax : kNormalRollOutMax;
-    const float roll_ki = pivot_turn ? kNormalPivotRollKi : kNormalRollKi;
-    const float roll_integral_limit =
-        pivot_turn ? kNormalPivotRollIntegralMax : kNormalRollIntegralMax;
     const float roll_target = kNormalRollZeroOffset;
     const float roll_error = roll_target - INS.Roll;
-    const float pivot_leg_diff_abs =
-        fabsf(left_leg_.GetLegLen() - right_leg_.GetLegLen());
-    const float pivot_roll_leg_scale =
-        pivot_turn
-            ? ClampRange((kPivotRollCutoffLegDiff - pivot_leg_diff_abs) /
-                             (kPivotRollCutoffLegDiff - kPivotRollFullLegDiff),
-                         0.0f, 1.0f)
-            : 1.0f;
-    if (controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-      if (!pivot_turn || pivot_roll_leg_scale > 0.0f) {
-        normal_pivot_roll_integral_ = ClampAbs(
-            normal_pivot_roll_integral_ +
-                pivot_roll_leg_scale * roll_ki * roll_error * controller_dt_,
-            roll_integral_limit);
-      } else {
-        // Equal leg length is a hard pivot constraint. Do not retain roll
-        // integral energy while the measured length mismatch is out of range.
-        normal_pivot_roll_integral_ = 0.0f;
+
+    // A differential support force controls fast roll motion, but it cannot
+    // remove the geometric constraint imposed by equal stiff leg-length
+    // Reconstruct the contact-height difference directly from body Roll and
+    // the measured vertical components of both legs. This works on arbitrary
+    // uneven terrain and, unlike the former PI/terrain-confirm path, carries no
+    // terrain memory onto flat ground. kRollLenDirection is the single sign to
+    // flip if a static supported test shows the opposite convention.
+    const bool roll_length_safe =
+        normal_grounded && !normal_airborne_seen_ && !normal_touchdown_active_ &&
+        !normal_handoff_active_ && !jump_landing_handoff && !in_place_yaw &&
+        controller_dt_ > 0.0f && controller_dt_ < 0.02f &&
+        GetDmFaultMaskNow() == 0U && GetDmOfflineMaskNow() == 0U &&
+        GetDmDisabledMaskNow() == 0U;
+    float roll_len_target = 0.0f;
+    // During an in-place turn the differential wheel reaction creates a
+    // transient Roll/leg-length difference even on flat ground. Do not feed
+    // that motion back as an estimated terrain step: command equal leg lengths
+    // and leave Roll rejection to the differential force loop plus the
+    // yaw-specific leg synchronizer below.
+    if (roll_length_safe) {
+      const float left_vertical_length =
+          left_leg_.GetLegLen() * arm_cos_f32(left_leg_.GetTheta());
+      const float right_vertical_length =
+          right_leg_.GetLegLen() * arm_cos_f32(right_leg_.GetTheta());
+      float estimated_ground_height_diff =
+          LEG_FF_WHEEL_TRACK * arm_sin_f32(INS.Roll - roll_target) -
+          (left_vertical_length - right_vertical_length);
+      if (fabsf(estimated_ground_height_diff) <
+          kRollTerrainHeightDeadband) {
+        estimated_ground_height_diff = 0.0f;
       }
-    } else {
-      normal_pivot_roll_integral_ = 0.0f;
+      // Positive ground-height difference means the left wheel is higher, so
+      // the left leg must be the short leg. roll_len_delta_cmd_ is one half of
+      // the final left/right reference difference.
+      roll_len_target = ClampAbs(
+          0.5f * kRollLenDirection * estimated_ground_height_diff,
+          kRollLenMax);
     }
-    float normal_roll_raw = 0.0f;
-    if (pivot_turn || fabsf(roll_error) > kRollDeadBand ||
-        fabsf(INS.Gyro[0]) > 0.01f) {
-      normal_roll_raw = pivot_roll_leg_scale *
-                        ClampAbs(roll_kp * roll_error - roll_kd * INS.Gyro[0] +
-                                     normal_pivot_roll_integral_,
+    const float roll_len_dt =
+        (controller_dt_ > 0.0f && controller_dt_ < 0.02f) ? controller_dt_
+                                                          : 0.001f;
+    const float roll_len_alpha =
+        roll_len_dt / (kRollLenTimeConstant + roll_len_dt);
+    // Do not chase millimetre-scale geometry noise once the terrain height is
+    // steady. Apply the dead zone to the target discrepancy rather than to the
+    // absolute terrain height, so a large terrain transition retains the fast
+    // filter/slew response and smoothly comes to rest without relay chatter.
+    const float roll_len_target_error =
+        roll_len_target - roll_len_delta_cmd_;
+    const float roll_len_command_deadband =
+        roll_length_safe ? kRollLenCommandDeadband : 0.0f;
+    float roll_len_driven_error = 0.0f;
+    if (roll_len_target_error > roll_len_command_deadband) {
+      roll_len_driven_error =
+          roll_len_target_error - roll_len_command_deadband;
+    } else if (roll_len_target_error < -roll_len_command_deadband) {
+      roll_len_driven_error =
+          roll_len_target_error + roll_len_command_deadband;
+    }
+    const float roll_len_filtered =
+        roll_len_delta_cmd_ + roll_len_alpha * roll_len_driven_error;
+    const float previous_roll_len_delta = roll_len_delta_cmd_;
+    roll_len_delta_cmd_ =
+        SlewTowards(roll_len_delta_cmd_, roll_len_filtered,
+                    kRollLenSlewPerSecond * roll_len_dt);
+
+    // Apply the required difference by shortening only the low-side leg.  The
+    // long leg remains exactly at the operator/common length reference instead
+    // of being extended above it to preserve the former mean-length command.
+    // roll_len_delta_cmd_ was historically a half-difference, so shorten the
+    // opposite leg by twice its magnitude to retain the same differential
+    // authority.  If the short leg reaches MIN_LEG_LENGTH, accept the reduced
+    // Roll range rather than raising the anchored long leg.
+    const float roll_base_left_ref = left_ref;
+    const float roll_base_right_ref = right_ref;
+    float roll_left_ref = roll_base_left_ref;
+    float roll_right_ref = roll_base_right_ref;
+    const float previous_left_offset_raw =
+        previous_roll_len_delta > 0.0f ? -2.0f * previous_roll_len_delta
+                                       : 0.0f;
+    const float previous_right_offset_raw =
+        previous_roll_len_delta < 0.0f ? 2.0f * previous_roll_len_delta
+                                       : 0.0f;
+    const float previous_left_terrain_offset =
+        ClampRange(roll_base_left_ref + previous_left_offset_raw,
+                   MIN_LEG_LENGTH, MAX_LEG_LENGTH) -
+        roll_base_left_ref;
+    const float previous_right_terrain_offset =
+        ClampRange(roll_base_right_ref + previous_right_offset_raw,
+                   MIN_LEG_LENGTH, MAX_LEG_LENGTH) -
+        roll_base_right_ref;
+    float left_terrain_offset = 0.0f;
+    float right_terrain_offset = 0.0f;
+    if (roll_len_delta_cmd_ > 0.0f) {
+      left_terrain_offset = -2.0f * roll_len_delta_cmd_;
+      roll_left_ref = left_ref + left_terrain_offset;
+    } else if (roll_len_delta_cmd_ < 0.0f) {
+      right_terrain_offset = 2.0f * roll_len_delta_cmd_;
+      roll_right_ref = right_ref + right_terrain_offset;
+    }
+    left_ref = ClampRange(roll_left_ref, MIN_LEG_LENGTH, MAX_LEG_LENGTH);
+    right_ref = ClampRange(roll_right_ref, MIN_LEG_LENGTH, MAX_LEG_LENGTH);
+    left_terrain_offset = left_ref - roll_base_left_ref;
+    right_terrain_offset = right_ref - roll_base_right_ref;
+
+    // The shared length PID differentiates the measured length for damping.
+    // Without matching reference-velocity feed-forward, that damping resists a
+    // fast terrain command and forces the physical leg to lag its reference.
+    // Add only the velocity of the differential terrain offset here; operator
+    // length changes and every non-NORMAL state keep their established tuning.
+    const float left_terrain_ref_speed =
+        (left_terrain_offset - previous_left_terrain_offset) / roll_len_dt;
+    const float right_terrain_ref_speed =
+        (right_terrain_offset - previous_right_terrain_offset) / roll_len_dt;
+    const float left_terrain_velocity_ff =
+        ClampAbs(kRollLenVelocityFfGain * left_terrain_ref_speed,
+                 kRollLenVelocityFfMax);
+    const float right_terrain_velocity_ff =
+        ClampAbs(kRollLenVelocityFfGain * right_terrain_ref_speed,
+                 kRollLenVelocityFfMax);
+
+    const float target_leg_diff = left_ref - right_ref;
+    const float measured_leg_diff =
+        left_leg_.GetLegLen() - right_leg_.GetLegLen();
+    const float leg_diff_tracking_error =
+        measured_leg_diff - target_leg_diff;
+
+    const float roll_kp = kNormalRollKp;
+    const float roll_kd = kNormalRollKd;
+    const float roll_force_limit = kNormalRollOutMax;
+    const float pivot_roll_leg_scale = 1.0f;
+    // The LESO owns the low-frequency matched disturbance channel. Keeping the
+    // old integrator in parallel would make the two estimators fight and would
+    // retain force after a terrain/load transition.
+    normal_pivot_roll_integral_ = 0.0f;
+    roll_pd_force_ = 0.0f;
+    if (fabsf(roll_error) > kRollDeadBand ||
+        fabsf(INS.Gyro[0]) > kRollRateActivityThreshold) {
+      roll_pd_force_ = pivot_roll_leg_scale *
+                       ClampAbs(roll_kp * roll_error - roll_kd * INS.Gyro[0],
                                  roll_force_limit);
     }
+
+    const bool roll_leso_enable =
+#if ROLL_LESO_COMPENSATION_ENABLE
+        normal_grounded && !normal_airborne_seen_ &&
+        !normal_touchdown_active_ && !normal_handoff_active_ &&
+        !jump_landing_handoff && pivot_roll_leg_scale > 0.0f &&
+        controller_dt_ > 0.0f && controller_dt_ < 0.02f &&
+        GetDmFaultMaskNow() == 0U && GetDmOfflineMaskNow() == 0U &&
+        GetDmDisabledMaskNow() == 0U;
+#else
+        false;
+#endif
+    const float roll_leso_correction =
+        UpdateRollLeso(roll_leso_enable, INS.Roll, INS.Gyro[0]);
+    const float normal_roll_raw = ClampAbs(
+        roll_pd_force_ + pivot_roll_leg_scale * roll_leso_correction,
+        roll_force_limit);
     roll_force_cmd_ = ClampAbs(roll_force_cmd_, roll_force_limit);
-    const float roll_lpf_alpha =
-        pivot_turn ? kNormalPivotRollForceLpfAlpha : kNormalRollForceLpfAlpha;
-    if (pivot_turn && pivot_roll_leg_scale <= 0.0f) {
-      roll_force_cmd_ = 0.0f;
-    } else {
-      roll_force_cmd_ += roll_lpf_alpha * (normal_roll_raw - roll_force_cmd_);
-    }
+    const float roll_lpf_alpha = kNormalRollForceLpfAlpha;
+    roll_force_cmd_ += roll_lpf_alpha * (normal_roll_raw - roll_force_cmd_);
     const float roll_out = roll_force_cmd_;
 
     // Use one physical roll direction throughout NORMAL. Hardware terrain data
     // showed that the old non-pivot branch used the opposite sign and therefore
     // enlarged roll instead of levelling the body. Keep the independently
     // derived lateral-inertia feedforward direction unchanged.
-    left_ff = gravity_ff_left + roll_out - inertial_ff;
-    right_ff = gravity_ff_right - roll_out + inertial_ff;
+    left_ff = gravity_ff_left + roll_out - inertial_ff +
+              left_terrain_velocity_ff;
+    right_ff = gravity_ff_right - roll_out + inertial_ff +
+               right_terrain_velocity_ff;
 
-    // Preserve the operator's mean length command while allowing the two legs
-    // to follow uneven terrain. Independent clamps use the available travel
-    // near either mechanical limit instead of forcing equal target lengths.
-    // Do not convert body roll into a geometric leg-length difference in
-    // NORMAL. The measured test shows this path amplifies one loaded leg's
-    // oscillation. Differential support force above already controls roll.
-    roll_len_delta_cmd_ += kRollLenLpfAlpha * (0.0f - roll_len_delta_cmd_);
-    // --- Roll 鍑犱綍鑵块暱琛ュ伩 ---
-    // 鏃嬭浆鏃秗oll鍊炬枩
-    // 鈫?宸垎鑵块暱浠ヤ繚鎸佹満浣撴按骞砛 roll>0
-    // (鍙冲€? 鈫?宸﹁吙杩囬珮闇€鏀剁煭 鈫?left_ref -= delta, right_ref += delta
   } else {
     roll_force_cmd_ = 0.0f;
     normal_pivot_roll_integral_ = 0.0f;
     roll_len_delta_cmd_ = 0.0f;
+    roll_pd_force_ = 0.0f;
+    ResetRollLeso();
     left_ref = OFF_GROUND_LEG_LENGTH;
     right_ref = OFF_GROUND_LEG_LENGTH;
+  }
+
+  if (normal_touchdown_active_) {
+    // A contacted leg holds its measured touchdown length so compression
+    // creates an outward spring force.  A leg that has not touched yet stays
+    // extended and is not pulled toward the shorter operator target.
+    left_ref = normal_touchdown_left_contact_
+                   ? normal_touchdown_ref_l_
+                   : OFF_GROUND_LEG_LENGTH;
+    right_ref = normal_touchdown_right_contact_
+                    ? normal_touchdown_ref_r_
+                    : OFF_GROUND_LEG_LENGTH;
   }
 
   // NORMAL-only axle-midpoint speed loop. It remains active during a pivot:
   // common wheel speed must stay at zero while the differential channel turns
   // the chassis. Otherwise a drivetrain/pitch bias is added to both wheels and
   // moves the instantaneous rotation centre outside the robot.
-  if (translation_idle && !pivot_turn) {
-    if (controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-      normal_zero_speed_trim_torque_ = ClampAbs(
-          normal_zero_speed_trim_torque_ -
-              // Idle-only trim direction verified on hardware; the pivot loop
-              // below uses the opposite sign because it trims the turn drag.
-              kNormalZeroSpeedKi * normal_wheel_center_speed_ * controller_dt_,
-          kNormalZeroSpeedIntegralMax);
+  const bool zero_speed_integral_candidate =
+      translation_idle && normal_grounded &&
+      !normal_touchdown_active_ && !normal_handoff_active_ &&
+      fabsf(normal_speed_ref_) <= kNormalZeroSpeedIntegralEnableRef;
+  if (zero_speed_integral_candidate && controller_dt_ > 0.0f &&
+      controller_dt_ < 0.02f) {
+    if (normal_zero_speed_integral_delay_count_ <
+        kNormalZeroSpeedIntegralDelayTicks) {
+      normal_zero_speed_integral_delay_count_++;
     }
+    if (normal_zero_speed_integral_delay_count_ >=
+        kNormalZeroSpeedIntegralDelayTicks) {
+      const float zero_cross_threshold_sq =
+          kNormalZeroSpeedIntegralDeadband *
+          kNormalZeroSpeedIntegralDeadband;
+      if (normal_zero_speed_prev_speed_ * normal_wheel_center_speed_ <
+          -zero_cross_threshold_sq) {
+        // A repeated speed sign change indicates a balance oscillation, not a
+        // constant drivetrain bias. Discard most stored trim before integrating
+        // the new half-cycle.
+        normal_zero_speed_trim_torque_ *=
+            kNormalZeroSpeedZeroCrossRetention;
+      }
+      if (fabsf(normal_wheel_center_speed_) >
+          kNormalZeroSpeedIntegralDeadband) {
+        normal_zero_speed_trim_torque_ = ClampAbs(
+            normal_zero_speed_trim_torque_ -
+                kNormalZeroSpeedKi * normal_wheel_center_speed_ *
+                    controller_dt_,
+            kNormalZeroSpeedIntegralMax);
+      }
+    }
+    normal_zero_speed_prev_speed_ = normal_wheel_center_speed_;
   } else {
-    // Do not store common-wheel integral energy during a turn.  It would
-    // survive stick release as a backward command and move the pivot centre.
+    // A drive command, pivot, landing transition or invalid period immediately
+    // discards idle-only stored energy.
     normal_zero_speed_trim_torque_ = 0.0f;
+    normal_zero_speed_prev_speed_ = 0.0f;
+    normal_zero_speed_integral_delay_count_ = 0U;
   }
 
   // Cancel only the slow, persistent midpoint drift during an in-place turn.
@@ -1176,46 +1750,23 @@ void balance_Chassis::NormalCalc() {
   // below stops fast common-speed growth, while this integral removes the
   // remaining bias that leaves one wheel nearly stationary.  It is discarded
   // immediately outside a pivot.
-  if (pivot_turn && controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-    // Pitch now has an independent common-hip PI-D loop below, so I2 no longer
-    // needs a hard pitch gate. Integrate every pivot cycle to remove its own
-    // steady common-speed error instead of remaining disabled near the gate.
-    const float zero_cross_threshold_sq =
-        kPivotCenterIntegratorDeadband * kPivotCenterIntegratorDeadband;
-    if (normal_pivot_center_prev_speed_ * normal_wheel_center_speed_ <
-        -zero_cross_threshold_sq) {
-      // The measured I2 limit cycle crosses zero with a large stored trim.
-      // Discard most of that old half-cycle energy before integrating the new
-      // sign; retain a small fraction so genuine drivetrain bias is not lost.
-      normal_pivot_center_trim_torque_ *= kPivotCenterZeroCrossRetention;
-    }
-    if (fabsf(normal_wheel_center_speed_) > kPivotCenterIntegratorDeadband) {
-      normal_pivot_center_trim_torque_ = ClampAbs(
-          normal_pivot_center_trim_torque_ +
-              kPivotCenterSpeedKi * normal_wheel_center_speed_ * controller_dt_,
-          kPivotCenterIntegralMax);
-    }
-    normal_pivot_center_prev_speed_ = normal_wheel_center_speed_;
-  } else {
-    normal_pivot_center_trim_torque_ = 0.0f;
-    normal_pivot_center_prev_speed_ = 0.0f;
-  }
+  normal_pivot_center_trim_torque_ = 0.0f;
+  normal_pivot_center_prev_speed_ = 0.0f;
 
   // Normal mode attitude/common-wheel controller.
   LQRCalc();
   SynthesizeMotion();
+  normal_lqr_wheel_common_torque_ = 0.5f * (l_wheel_T_ + r_wheel_T_);
+  normal_zero_speed_correction_ = 0.0f;
 
   if (normal_grounded && controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-    // Remove steady NORMAL pitch with the common hip channel instead of adding
-    // a wheel-speed bias. The sign follows the fitted LQR hip/pitch
-    // coefficient: positive measured pitch requires positive common hip torque.
-    normal_pivot_pitch_integral_ =
-        ClampAbs(normal_pivot_pitch_integral_ +
-                     kNormalPivotHipPitchKi * normal_pitch * controller_dt_,
-                 kNormalPivotHipPitchIntegralMax);
+    // Pitch is already a state of the full LQR and has a direct common-hip P/D
+    // path. A second integral on either common actuator merely moves the other
+    // LQR states until the final common torque returns to zero.
+    normal_pivot_pitch_integral_ = 0.0f;
     const float normal_pitch_hip_torque = ClampAbs(
         kNormalPivotHipPitchKp * normal_pitch +
-            kNormalPivotHipPitchKd * INS.Gyro[1] + normal_pivot_pitch_integral_,
+            kNormalPivotHipPitchKd * INS.Gyro[1],
         kNormalPivotHipPitchTorqueMax);
     left_leg_T_ = ClampAbs(left_leg_T_ + normal_pitch_hip_torque, 40.0f);
     right_leg_T_ = ClampAbs(right_leg_T_ + normal_pitch_hip_torque, 40.0f);
@@ -1223,17 +1774,25 @@ void balance_Chassis::NormalCalc() {
     normal_pivot_pitch_integral_ = 0.0f;
   }
 
-  // With both sticks centred, a large left/right hip-torque difference twists
-  // the two legs in opposite directions.  That motion excites yaw, roll and
-  // the wheel-speed observer even though no yaw was requested.  Keep the
-  // common pitch-balancing torque, but bound only its differential component.
-  // Differential axial force above remains responsible for body roll.
-  if (translation_idle && !yaw_turn && normal_grounded) {
+  // Rebuild the grounded hip differential from one explicit synchronization
+  // mode.  A pure common projection removed the damping needed when recovery
+  // hands NORMAL two legs with unequal angles or opposite residual velocities;
+  // they then continued travelling apart.  This bounded PD keeps the LQR's
+  // common Pitch request, but permits only the differential torque that moves
+  // the two measured leg angles toward each other.  Yaw remains wheel-only and
+  // Roll remains in the differential axial-force path.
+  if (normal_grounded) {
     const float leg_torque_common = 0.5f * (left_leg_T_ + right_leg_T_);
-    const float leg_torque_diff = ClampAbs(0.5f * (right_leg_T_ - left_leg_T_),
-                                           kNormalIdleLegDiffTorqueMax);
-    left_leg_T_ = leg_torque_common - leg_torque_diff;
-    right_leg_T_ = leg_torque_common + leg_torque_diff;
+    const float leg_angle_diff =
+        left_leg_.GetTheta() - right_leg_.GetTheta();
+    const float leg_rate_diff =
+        left_leg_.GetDotTheta() - right_leg_.GetDotTheta();
+    const float leg_sync_torque = ClampAbs(
+        kNormalHipSyncKp * leg_angle_diff +
+            kNormalHipSyncKd * leg_rate_diff,
+        kNormalHipSyncTorqueMax);
+    left_leg_T_ = ClampAbs(leg_torque_common - leg_sync_torque, 40.0f);
+    right_leg_T_ = ClampAbs(leg_torque_common + leg_sync_torque, 40.0f);
   }
 
   // Recompose wheel output as common torque (pitch + midpoint) and
@@ -1344,6 +1903,13 @@ void balance_Chassis::NormalCalc() {
   } else {
     float wheel_common = 0.5f * (l_wheel_T_ + r_wheel_T_);
     float wheel_diff = 0.5f * (r_wheel_T_ - l_wheel_T_);
+    const bool translation_wheel_sync_enable =
+        normal_grounded && !translation_idle && !yaw_control_active &&
+        !normal_airborne_seen_ && !normal_touchdown_active_ &&
+        !normal_handoff_active_ && !jump_landing_handoff &&
+        controller_dt_ > 0.0f && controller_dt_ < 0.02f &&
+        GetDmFaultMaskNow() == 0U && GetDmOfflineMaskNow() == 0U &&
+        GetDmDisabledMaskNow() == 0U;
 
     float center_loop_scale =
         1.0f - fabsf(INS.Pitch) / kNormalCenterLoopPitchFade;
@@ -1355,81 +1921,42 @@ void balance_Chassis::NormalCalc() {
     // A pivot must retain midpoint-speed authority even while pitch is being
     // corrected.  Fading this loop to zero allowed the LQR common torque to
     // stop one wheel, moving the rotation centre onto that wheel.
-    const float center_loop_min_scale =
-        pivot_turn ? kPivotCenterLoopMinScale : kNormalCenterLoopMinScale;
+    const float center_loop_min_scale = kNormalCenterLoopMinScale;
     center_loop_scale =
         ClampRange(center_loop_scale, center_loop_min_scale, 1.0f);
-    // Hold axle-midpoint speed at its target both while standing and pivoting.
-    // Excluding pivot_turn here left the common wheel velocity uncontrolled,
-    // so one wheel stopped and the chassis rotated about that wheel.
-    if (translation_idle) {
-      const float center_speed_kp =
-          pivot_turn ? kPivotCenterSpeedKp : kNormalZeroSpeedKp;
-      const float center_speed_torque_sign = pivot_turn
-                                                 ? kPivotCenterSpeedTorqueSign
-                                                 : kNormalCenterSpeedTorqueSign;
-      const float center_speed_torque_max =
-          pivot_turn ? kPivotCenterSpeedTorqueMax : kNormalZeroSpeedTorqueMax;
+    // The pivot branch above owns its own midpoint loop. This branch fades in
+    // only the straight-line idle correction as the translation ramp settles.
+    if (normal_zero_speed_blend > 0.0f) {
       // A centred translation stick means an exact zero axle-midpoint target.
-      // In particular, never reuse the translation drift bias during a pivot.
-      // During a pivot the turn drags the axle backward; hold a small forward
-      // axle-midpoint target so the wheel pair stays symmetric around zero.
-      float center_speed_target = 0.0f;
-      if (pivot_turn) {
-        const float yaw_ratio = ClampRange(
-            fabsf(target_w_rotation_) / kNormalYawRateScale, 0.0f, 1.0f);
-        center_speed_target =
-            kPivotYawBiasCubicA * yaw_ratio * yaw_ratio * yaw_ratio +
-            kPivotYawBiasCubicB * yaw_ratio * yaw_ratio +
-            kPivotYawBiasCubicC * yaw_ratio + kPivotYawBiasCubicD;
-      }
       const float center_speed_torque =
-          center_loop_scale *
-          ClampAbs(center_speed_torque_sign * center_speed_kp *
-                           (center_speed_target - normal_wheel_center_speed_) +
-                       (pivot_turn ? normal_pivot_center_trim_torque_
-                                   : normal_zero_speed_trim_torque_),
-                   center_speed_torque_max);
-      // I11: actual common-wheel correction during a NORMAL pivot.  This lets
-      // the VOFA trace distinguish an inactive centre loop from a correction
-      // that is being opposed by the LQR common torque.
-      normal_pivot_left_wheel_corr_ = pivot_turn ? center_speed_torque : 0.0f;
+          normal_zero_speed_blend * center_loop_scale *
+          ClampAbs(kNormalCenterSpeedTorqueSign * kNormalZeroSpeedKp *
+                           (0.0f - normal_wheel_center_speed_) +
+                       normal_zero_speed_trim_torque_,
+                   kNormalZeroSpeedTorqueMax);
+      normal_zero_speed_correction_ = center_speed_torque;
       wheel_common += center_speed_torque;
     }
 
-    if (yaw_turn) {
-      // Orthogonal pivot control: the common loop above holds axle-centre speed
-      // at zero, while this loop controls only differential wheel speed. This
-      // avoids two independent wheel PIs generating an unwanted common torque.
-      // The operator yaw request is already a physical yaw-rate command. Do
-      // not add a second IMU yaw-rate loop here: its sign/phase is different
-      // from the encoder loop and the two loops previously fought until torque
-      // saturation.  Only the high-speed end receives extra differential
-      // authority, because the common positive bias otherwise drives both
-      // wheels in the same direction and produces a large-radius circle.
-      const float raw_target_diff_speed =
+    if (yaw_control_active) {
+      // One wheel-only yaw-rate controller is used for all NORMAL commands.
+      // The kinematic wheel-difference target is corrected by measured IMU yaw
+      // rate.  When the command has slewed to zero this same expression changes
+      // sign and brakes residual rotation without a controller hand-off.
+      const float geometric_diff_speed =
           0.5f * LEG_FF_WHEEL_TRACK * target_w_rotation_;
-      const float yaw_command_ratio = ClampRange(
-          fabsf(target_w_rotation_) / kNormalYawRateScale, 0.0f, 1.0f);
-      const float high_speed_diff_gain = 1.0f + kPivotHighSpeedDiffExtraGain *
-                                                    yaw_command_ratio *
-                                                    yaw_command_ratio;
-      const float base_target_diff_speed =
-          raw_target_diff_speed * high_speed_diff_gain;
-      // Equal and opposite wheel targets put the kinematic turn centre at the
-      // axle midpoint.  Do not add a same-sign wheel-speed bias here.
-      const float pivot_common_speed_target =
-          pivot_turn ? 0.0f : normal_common_speed_target;
+      const float target_diff_speed = ClampAbs(
+          geometric_diff_speed +
+              kPivotYawRateToDiffSpeedKp *
+                  (target_w_rotation_ - INS.YawSpeed),
+          0.5f * LEG_FF_WHEEL_TRACK * YAW_SPEED_MAX);
+      const float yaw_common_speed_target = normal_common_speed_target;
       const float target_left_speed =
-          pivot_common_speed_target - base_target_diff_speed;
+          yaw_common_speed_target - target_diff_speed;
       const float target_right_speed =
-          pivot_common_speed_target + base_target_diff_speed;
+          yaw_common_speed_target + target_diff_speed;
       normal_target_left_wheel_speed_ = target_left_speed;
       normal_target_right_wheel_speed_ = target_right_speed;
-      // Keep the original differential target unchanged.  Folding the biased
-      // targets back into a new differential target mostly slowed the other
-      // wheel instead of accelerating the selected stalled wheel.
-      const float target_diff_speed = base_target_diff_speed;
       const float diff_speed_error =
           target_diff_speed - normal_wheel_diff_speed_;
 
@@ -1451,18 +1978,7 @@ void balance_Chassis::NormalCalc() {
           ClampRange((kPivotYawCutoffLegAngle - max_relative_angle) /
                          (kPivotYawCutoffLegAngle - kPivotYawFullLegAngle),
                      0.0f, 1.0f);
-      // Keep full yaw authority even while the axle midpoint is off zero: the
-      // forward-commanded wheel needs the extra differential torque to leave
-      // its near-stall state, otherwise the whole-cycle average drifts back.
-      const float center_speed_yaw_scale =
-          pivot_turn
-              ? ClampRange((kPivotFullCenterSpeed -
-                            fabsf(normal_wheel_center_speed_)) /
-                               (kPivotFullCenterSpeed - kPivotStartCenterSpeed),
-                           1.0f, 1.0f)
-              : 1.0f;
-      const float yaw_balance_scale =
-          pitch_yaw_scale * leg_yaw_scale * center_speed_yaw_scale;
+      const float yaw_balance_scale = pitch_yaw_scale * leg_yaw_scale;
 
       // Explicitly cancel every yaw integral. The wheel-speed P loop is the
       // only NORMAL yaw actuator, both during a pivot and while translating.
@@ -1490,25 +2006,56 @@ void balance_Chassis::NormalCalc() {
       // the same motors and drove the wheel feedback into the large
       // oscillation seen during yaw commands.
     } else {
-      // Centred yaw stick means zero differential torque immediately.  A
-      // filtered tail here contaminates the following translation command.
+      // With zero yaw rate and no residual rotation, use a small P-only
+      // differential wheel-speed
+      // loop while translating.  If the left wheel is slower, left-right speed
+      // is negative, so wheel_diff becomes negative: left=common-diff gains
+      // torque and right=common+diff loses torque.  The same relation also works
+      // in reverse.  This is generic load sharing, not a bridge/stair detector.
       normal_pivot_yaw_torque_cmd_ = 0.0f;
       normal_pivot_left_speed_integral_ = 0.0f;
       normal_pivot_right_speed_integral_ = 0.0f;
-      wheel_diff = 0.0f;
+      if (translation_wheel_sync_enable) {
+        const float actual_left_speed =
+            normal_wheel_center_speed_ - normal_wheel_diff_speed_;
+        const float actual_right_speed =
+            normal_wheel_center_speed_ + normal_wheel_diff_speed_;
+        const float wheel_sync_raw = ClampAbs(
+            kNormalTranslationWheelSyncKp *
+                (actual_left_speed - actual_right_speed),
+            kNormalTranslationWheelSyncMax);
+        normal_translation_wheel_sync_torque_ +=
+            kNormalTranslationWheelSyncLpfAlpha *
+            (wheel_sync_raw - normal_translation_wheel_sync_torque_);
+        wheel_diff = normal_translation_wheel_sync_torque_;
+      } else {
+        // Zero input, yaw, flight and hybrid contact transitions must not retain
+        // a differential torque tail in the next control mode.
+        normal_translation_wheel_sync_torque_ = 0.0f;
+        wheel_diff = 0.0f;
+      }
     }
 
-    // Preserve the common/differential decomposition at saturation.  Giving
-    // the differential command first priority keeps the wheel pair opposed;
-    // independently clipping the two sides changes their mean and shifts the
-    // turn centre whenever only one side saturates.
-    if (pivot_turn || yaw_turn) {
-      wheel_diff = ClampAbs(wheel_diff, kNormalWheelTorqueLimit);
-      const float pivot_common_limit =
-          kNormalWheelTorqueLimit - fabsf(wheel_diff);
-      wheel_common = ClampAbs(wheel_common, pivot_common_limit);
+    // Preserve the common/differential decomposition at saturation.  NORMAL
+    // balance torque has first priority; yaw uses only the remaining symmetric
+    // wheel authority and therefore cannot starve Pitch stabilization.
+    if (yaw_control_active) {
+      wheel_common = ClampAbs(wheel_common, kNormalWheelTorqueLimit);
+      const float yaw_diff_limit =
+          kNormalWheelTorqueLimit - fabsf(wheel_common);
+      wheel_diff = ClampAbs(wheel_diff, yaw_diff_limit);
       l_wheel_T_ = wheel_common - wheel_diff;
       r_wheel_T_ = wheel_common + wheel_diff;
+    } else if (translation_wheel_sync_enable) {
+      // During straight-line load sharing, clamp the two physical wheel
+      // requests independently.  This keeps the slower/blocked wheel at its
+      // available limit while reducing the faster wheel.  A common-priority
+      // allocator would erase all differential authority whenever the common
+      // LQR request reached the 10 N.m limit.
+      l_wheel_T_ =
+          ClampAbs(wheel_common - wheel_diff, kNormalWheelTorqueLimit);
+      r_wheel_T_ =
+          ClampAbs(wheel_common + wheel_diff, kNormalWheelTorqueLimit);
     } else {
       wheel_common = ClampAbs(wheel_common, kNormalWheelTorqueLimit);
       float diff_limit = kNormalWheelTorqueLimit - fabsf(wheel_common);
@@ -1525,35 +2072,78 @@ void balance_Chassis::NormalCalc() {
   active_right_leg_ref_ = right_ref;
   LegLenCalc(left_ref, right_ref, left_ff, right_ff);
 
-  // Synchronise measured leg lengths throughout NORMAL.  Equal references alone
-  // cannot remove a persistent left/right load or mechanism bias; this bounded
-  // differential loop closes that missing state without touching hip torques.
-  if (normal_grounded) {
-    // Use full differential length authority whenever a NORMAL pivot is active.
-    // Scheduling it down at low/medium yaw left a visible length mismatch even
-    // though the requested references were equal.
-    const float pivot_leg_sync_blend = pivot_turn ? 1.0f : 0.0f;
-    const float leg_sync_kp =
-        kNormalLegSyncKp +
-        (kPivotLegSyncKp - kNormalLegSyncKp) * pivot_leg_sync_blend;
-    const float leg_sync_kd =
-        kNormalLegSyncKd +
-        (kPivotLegSyncKd - kNormalLegSyncKd) * pivot_leg_sync_blend;
-    const float leg_sync_force_max =
-        kNormalLegSyncForceMax +
-        (kPivotLegSyncForceMax - kNormalLegSyncForceMax) * pivot_leg_sync_blend;
-    const float leg_length_diff =
-        left_leg_.GetLegLen() - right_leg_.GetLegLen();
-    if (pivot_turn && controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-      normal_pivot_leg_sync_integral_ =
-          ClampAbs(normal_pivot_leg_sync_integral_ +
-                       kPivotLegSyncKi * leg_length_diff * controller_dt_,
-                   kPivotLegSyncIntegralMax);
-    } else {
-      normal_pivot_leg_sync_integral_ = 0.0f;
+  if (!normal_grounded || normal_airborne_seen_) {
+    // The ordinary NORMAL length PID is deliberately filtered for quiet
+    // ground driving.  Immediately after an airborne JUMP -> NORMAL hand-off
+    // that filter deploys the legs too slowly and leaves too little stroke for
+    // impact absorption.  Use a bounded, unfiltered airborne PD until the
+    // touchdown detector captures either leg; the contacted side is then
+    // replaced by the compliant impedance below in the same control cycle.
+    if (!normal_touchdown_left_contact_) {
+      left_leg_F_ = ClampRange(
+          NORMAL_OFF_GROUND_EXTEND_KP *
+                  (OFF_GROUND_LEG_LENGTH - left_leg_.GetLegLen()) -
+              NORMAL_OFF_GROUND_EXTEND_KD * left_leg_.GetLegSpeed(),
+          NORMAL_OFF_GROUND_FORCE_MIN, NORMAL_OFF_GROUND_FORCE_MAX);
     }
+    if (!normal_touchdown_right_contact_) {
+      right_leg_F_ = ClampRange(
+          NORMAL_OFF_GROUND_EXTEND_KP *
+                  (OFF_GROUND_LEG_LENGTH - right_leg_.GetLegLen()) -
+              NORMAL_OFF_GROUND_EXTEND_KD * right_leg_.GetLegSpeed(),
+          NORMAL_OFF_GROUND_FORCE_MIN, NORMAL_OFF_GROUND_FORCE_MAX);
+    }
+  }
+  if (normal_touchdown_active_) {
+    // Landing-only compliant impedance.  Near the mechanical minimum, add a
+    // progressive virtual bump stop while the leg is still compressing.
+    const float left_speed = left_leg_.GetLegSpeed();
+    const float right_speed = right_leg_.GetLegSpeed();
+    const float left_touchdown_force = CalculateLandingImpedanceForce(
+        left_ref, left_leg_.GetLegLen(), left_speed,
+        k_gravity_comp * arm_cos_f32(left_leg_.GetTheta()),
+        NORMAL_TOUCHDOWN_KP, NORMAL_TOUCHDOWN_KD,
+        NORMAL_TOUCHDOWN_FORCE_MIN, NORMAL_TOUCHDOWN_FORCE_MAX,
+        NORMAL_TOUCHDOWN_SOFT_LIMIT, NORMAL_TOUCHDOWN_SOFT_STOP_KP,
+        NORMAL_TOUCHDOWN_SOFT_STOP_KD, normal_touchdown_left_contact_);
+    const float right_touchdown_force = CalculateLandingImpedanceForce(
+        right_ref, right_leg_.GetLegLen(), right_speed,
+        k_gravity_comp * arm_cos_f32(right_leg_.GetTheta()),
+        NORMAL_TOUCHDOWN_KP, NORMAL_TOUCHDOWN_KD,
+        NORMAL_TOUCHDOWN_FORCE_MIN, NORMAL_TOUCHDOWN_FORCE_MAX,
+        NORMAL_TOUCHDOWN_SOFT_LIMIT, NORMAL_TOUCHDOWN_SOFT_STOP_KP,
+        NORMAL_TOUCHDOWN_SOFT_STOP_KD, normal_touchdown_right_contact_);
+    // Do not apply ground-impact impedance to a leg that is still airborne.
+    // Its existing 0.40 m reference remains under the regular filtered PID.
+    if (normal_touchdown_left_contact_) {
+      left_leg_F_ = left_touchdown_force;
+    }
+    if (normal_touchdown_right_contact_) {
+      right_leg_F_ = right_touchdown_force;
+    }
+  }
+
+  // Track the commanded leg-length difference throughout NORMAL.  On flat
+  // ground this target is zero; on a cross-slope it is the intentional geometric
+  // roll correction above.  Driving the measured difference to zero here would
+  // directly cancel that correction and force the body to follow the slope.
+  if (normal_grounded && !normal_touchdown_active_) {
+    // Differential wheel reaction compresses opposite legs for opposite yaw
+    // directions.  Use a firmer, still P/D-only synchronizer while yawing so
+    // this reversible load does not become a visible leg-length split.
+    const float leg_sync_kp =
+        in_place_yaw ? kNormalYawLegSyncKp : kNormalLegSyncKp;
+    const float leg_sync_kd =
+        in_place_yaw ? kNormalYawLegSyncKd : kNormalLegSyncKd;
+    const float leg_sync_force_max = kNormalLegSyncForceMax;
+    const float measured_leg_length_diff =
+        left_leg_.GetLegLen() - right_leg_.GetLegLen();
+    const float target_leg_length_diff = left_ref - right_ref;
+    const float leg_length_diff_error =
+        measured_leg_length_diff - target_leg_length_diff;
+    normal_pivot_leg_sync_integral_ = 0.0f;
     const float leg_sync_raw = ClampAbs(
-        leg_sync_kp * leg_length_diff +
+        leg_sync_kp * leg_length_diff_error +
             leg_sync_kd * (left_leg_.GetLegSpeed() - right_leg_.GetLegSpeed()) +
             normal_pivot_leg_sync_integral_,
         leg_sync_force_max);
@@ -1565,10 +2155,97 @@ void balance_Chassis::NormalCalc() {
     normal_pivot_leg_sync_force_ = 0.0f;
     normal_pivot_leg_sync_integral_ = 0.0f;
   }
+  if (roll_leso_active_) {
+    // Feed the observer the final virtual axial-force half-difference after
+    // gravity feedforward, length PID and leg synchronisation. This is the
+    // differential input actually handed to VMC, not merely the Roll branch's
+    // requested portion of it.
+    roll_leso_applied_force_ = 0.5f * (left_leg_F_ - right_leg_F_);
+  }
+  if (GetOffGround()) {
+    const float airborne_theta_goal = ClampAbs(
+        AIRBORNE_LEG_FORWARD_SIGN * AIRBORNE_LEG_SPEED_ANGLE_GAIN *
+            normal_airborne_forward_speed_ref_,
+        AIRBORNE_LEG_ANGLE_MAX);
+    normal_airborne_theta_ref_ = SlewTowards(
+        normal_airborne_theta_ref_, airborne_theta_goal,
+        AIRBORNE_LEG_ANGLE_SLEW_PER_TICK);
+    // Replace the zero-theta off-ground LQR hip rows with an explicit
+    // world-frame foot-placement PD. Wheel pitch control remains independent.
+    left_leg_T_ = ClampAbs(
+        AIRBORNE_LEG_ANGLE_KP *
+                (normal_airborne_theta_ref_ - left_leg_.GetTheta()) -
+            AIRBORNE_LEG_ANGLE_KD * left_leg_.GetDotTheta(),
+        AIRBORNE_LEG_ANGLE_TORQUE_MAX);
+    right_leg_T_ = ClampAbs(
+        AIRBORNE_LEG_ANGLE_KP *
+                (normal_airborne_theta_ref_ - right_leg_.GetTheta()) -
+            AIRBORNE_LEG_ANGLE_KD * right_leg_.GetDotTheta(),
+        AIRBORNE_LEG_ANGLE_TORQUE_MAX);
+  } else {
+    normal_airborne_theta_ref_ = 0.0f;
+  }
+  if (normal_airborne_wheel_control_active_ && GetOffGround()) {
+    // NORMAL's off-ground gain matrix deliberately zeros both wheel rows.  A
+    // direct airborne hand-off would therefore discard the reaction-wheel
+    // pitch authority that was active in RETRACT. Continue the same verified
+    // shaft-speed/pitch convention until the touchdown detector takes over.
+    float airborne_dt = controller_dt_;
+    if (airborne_dt <= 0.0f || airborne_dt > 0.02f)
+      airborne_dt = 0.001f;
+
+    normal_airborne_pitch_ref_integral_ = ClampAbs(
+        normal_airborne_pitch_ref_integral_ -
+            JUMP_RETRACT_WHEEL_PITCH_REF_KI * INS.Pitch * airborne_dt,
+        JUMP_RETRACT_WHEEL_PITCH_REF_I_MAX);
+    const float pitch_speed_ref_trim = ClampAbs(
+        -JUMP_RETRACT_WHEEL_PITCH_REF_KP * INS.Pitch -
+            JUMP_RETRACT_WHEEL_PITCH_REF_KD * INS.Gyro[1] +
+            normal_airborne_pitch_ref_integral_,
+        JUMP_RETRACT_WHEEL_PITCH_REF_MAX);
+    const float airborne_wheel_ref_l =
+        normal_airborne_wheel_ref_l_ + pitch_speed_ref_trim;
+    const float airborne_wheel_ref_r =
+        normal_airborne_wheel_ref_r_ + pitch_speed_ref_trim;
+    const float left_error =
+        left_wheel.Get_Now_Omega() - airborne_wheel_ref_l;
+    const float right_error =
+        right_wheel.Get_Now_Omega() - airborne_wheel_ref_r;
+
+    normal_airborne_wheel_integral_l_ = ClampAbs(
+        normal_airborne_wheel_integral_l_ +
+            JUMP_WHEEL_SPEED_KI * left_error * airborne_dt,
+        JUMP_WHEEL_INTEGRAL_MAX);
+    normal_airborne_wheel_integral_r_ = ClampAbs(
+        normal_airborne_wheel_integral_r_ -
+            JUMP_WHEEL_SPEED_KI * right_error * airborne_dt,
+        JUMP_WHEEL_INTEGRAL_MAX);
+    l_wheel_T_ = ClampAbs(JUMP_WHEEL_SPEED_KP * left_error +
+                              normal_airborne_wheel_integral_l_,
+                          JUMP_WHEEL_TORQUE_MAX);
+    r_wheel_T_ = ClampAbs(-JUMP_WHEEL_SPEED_KP * right_error +
+                              normal_airborne_wheel_integral_r_,
+                          JUMP_WHEEL_TORQUE_MAX);
+  } else if (normal_airborne_wheel_control_active_) {
+    normal_airborne_wheel_control_active_ = false;
+    normal_airborne_wheel_integral_l_ = 0.0f;
+    normal_airborne_wheel_integral_r_ = 0.0f;
+    normal_airborne_pitch_ref_integral_ = 0.0f;
+  }
   if (jump_landing_handoff) {
     l_wheel_T_ *= jump_landing_wheel_scale;
     r_wheel_T_ *= jump_landing_wheel_scale;
   }
+  const bool leso_enable =
+#if LESO_COMPENSATION_ENABLE
+      !GetOffGround() && !normal_airborne_seen_ && !normal_touchdown_active_ &&
+      jump_normal_handoff_count_ == 0U && controller_dt_ > 0.0f &&
+      controller_dt_ < 0.02f && GetDmFaultMaskNow() == 0U &&
+      GetDmOfflineMaskNow() == 0U && GetDmDisabledMaskNow() == 0U;
+#else
+      false;
+#endif
+  ApplyLesoCompensation(leso_enable);
   TorCalc();
 }
 
@@ -1609,6 +2286,13 @@ uint8_t balance_Chassis::GetDmDisabledMaskNow() const {
   if (rb_joint_.HasDriverDisabled())
     mask |= 0x08U;
   return mask;
+}
+
+void balance_Chassis::EnableAllJointMotors() {
+  lf_joint_.Enable();
+  lb_joint_.Enable();
+  rf_joint_.Enable();
+  rb_joint_.Enable();
 }
 
 /**
@@ -2874,11 +3558,77 @@ float balance_Chassis::GetJumpLandingWorldThetaRef() {
 void balance_Chassis::JumpCalc() {
   const JumpSubStatus current_status = jump_status;
   JumpSubStatus next_status = current_status;
+  const bool jump_landing_phase =
+      current_status == JUMP_LAND_PREP ||
+      current_status == JUMP_LAND_IMPACT ||
+      current_status == JUMP_LAND_SETTLE;
+  const bool jump_contact_detection_enabled =
+      jump_landing_phase && jump_airborne_confirmed_;
+  const bool jump_left_force_contact =
+      jump_contact_detection_enabled &&
+      left_leg_.GetForceNormal() > JUMP_LAND_CONTACT_FORCE_THRESHOLD &&
+      left_leg_.GetLegSpeed() <= JUMP_LAND_CONTACT_EXTENSION_SPEED_MAX;
+  const bool jump_right_force_contact =
+      jump_contact_detection_enabled &&
+      right_leg_.GetForceNormal() > JUMP_LAND_CONTACT_FORCE_THRESHOLD &&
+      right_leg_.GetLegSpeed() <= JUMP_LAND_CONTACT_EXTENSION_SPEED_MAX;
+
+  // A wheel can catch the stair edge without producing a clean 30 N normal
+  // force estimate.  Once landing deployment has had time to start, regard a
+  // leg as geometrically blocked when it remains well behind the shared length
+  // reference and has almost stopped extending.  Each side is qualified
+  // independently so the contacted leg can enter impedance control while the
+  // other side continues to deploy.
+  const bool jump_blocked_detector_armed =
+      jump_contact_detection_enabled &&
+      jump_timer >= JUMP_LAND_BLOCKED_ARM_TICKS;
+  const bool jump_left_blocked_sample =
+      jump_blocked_detector_armed &&
+      left_leg_.GetForceNormal() > JUMP_LAND_BLOCKED_FORCE_SEED &&
+      jump_land_deploy_ref_ - left_leg_.GetLegLen() >=
+          JUMP_LAND_BLOCKED_LENGTH_ERROR &&
+      left_leg_.GetLegSpeed() <= JUMP_LAND_BLOCKED_SPEED_MAX;
+  const bool jump_right_blocked_sample =
+      jump_blocked_detector_armed &&
+      right_leg_.GetForceNormal() > JUMP_LAND_BLOCKED_FORCE_SEED &&
+      jump_land_deploy_ref_ - right_leg_.GetLegLen() >=
+          JUMP_LAND_BLOCKED_LENGTH_ERROR &&
+      right_leg_.GetLegSpeed() <= JUMP_LAND_BLOCKED_SPEED_MAX;
+  if (jump_left_blocked_sample) {
+    if (jump_left_blocked_count_ < JUMP_LAND_BLOCKED_CONFIRM_TICKS)
+      jump_left_blocked_count_++;
+  } else {
+    jump_left_blocked_count_ = 0U;
+  }
+  if (jump_right_blocked_sample) {
+    if (jump_right_blocked_count_ < JUMP_LAND_BLOCKED_CONFIRM_TICKS)
+      jump_right_blocked_count_++;
+  } else {
+    jump_right_blocked_count_ = 0U;
+  }
+  if (jump_left_blocked_count_ >= JUMP_LAND_BLOCKED_CONFIRM_TICKS)
+    jump_left_blocked_contact_ = true;
+  if (jump_right_blocked_count_ >= JUMP_LAND_BLOCKED_CONFIRM_TICKS)
+    jump_right_blocked_contact_ = true;
   const bool jump_left_contact_raw =
-      left_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD;
+      jump_landing_phase
+          ? (jump_left_force_contact || jump_left_blocked_contact_)
+          : left_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD;
   const bool jump_right_contact_raw =
-      right_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD;
-  if (current_status == JUMP_LAND_PREP) {
+      jump_landing_phase
+          ? (jump_right_force_contact || jump_right_blocked_contact_)
+          : right_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD;
+  if (jump_landing_phase && jump_airborne_confirmed_) {
+    // Capture each leg at the first raw impact.  The captured length becomes
+    // that side's zero-step impedance reference after contact is confirmed.
+    if (jump_left_contact_raw && !jump_touchdown_capture_l_) {
+      jump_touchdown_capture_l_ = true;
+      jump_touchdown_ref_l_ = left_leg_.GetLegLen();
+    }
+    if (jump_right_contact_raw && !jump_touchdown_capture_r_) {
+      jump_touchdown_capture_r_ = true;
+      jump_touchdown_ref_r_ = right_leg_.GetLegLen();
+    }
     if (jump_left_contact_raw) {
       jump_left_release_count_ = 0U;
       if (jump_left_contact_count_ < JUMP_LAND_CONTACT_CONFIRM_TICKS)
@@ -2921,22 +3671,58 @@ void balance_Chassis::JumpCalc() {
     jump_wheel_integral_l_ = 0.0f;
     jump_wheel_integral_r_ = 0.0f;
   }
+  if (jump_landing_phase && jump_both_contact_latched_ &&
+      !jump_landing_pitch_ready_) {
+    // Do not immediately brake the translation reference to zero while the
+    // body still has a large landing pitch transient.  Requiring consecutive
+    // quiet samples prevents a single IMU zero crossing from releasing the
+    // second-stage brake too early.
+    const bool pitch_ready_sample =
+        fabsf(INS.Pitch) <= JUMP_LAND_BRAKE_PITCH_READY_ANGLE &&
+        fabsf(INS.Gyro[1]) <= JUMP_LAND_BRAKE_PITCH_READY_RATE;
+    if (pitch_ready_sample) {
+      if (jump_landing_pitch_ready_count_ <
+          JUMP_LAND_BRAKE_PITCH_READY_TICKS)
+        jump_landing_pitch_ready_count_++;
+    } else {
+      jump_landing_pitch_ready_count_ = 0U;
+    }
+    if (jump_landing_pitch_ready_count_ >=
+        JUMP_LAND_BRAKE_PITCH_READY_TICKS)
+      jump_landing_pitch_ready_ = true;
+  } else if (!jump_both_contact_latched_) {
+    jump_landing_pitch_ready_count_ = 0U;
+  }
 
   float left_ref = MIN_LEG_LENGTH;
   float right_ref = MIN_LEG_LENGTH;
   float left_ff = 0.0f;
   float right_ff = 0.0f;
-  float direct_leg_force = 0.0f;
-  bool use_direct_leg_force = false;
+  float direct_leg_force_l = 0.0f;
+  float direct_leg_force_r = 0.0f;
+  bool override_leg_force_l = false;
+  bool override_leg_force_r = false;
   bool use_landing_leg_force = false;
 
   if (current_status == JUMP_ASCEND || current_status == JUMP_RETRACT ||
-      current_status == JUMP_LAND_PREP) {
+      jump_landing_phase) {
     jump_timer++;
     const bool jump_raw_unloaded =
         (left_leg_.GetForceNormal() < OFF_GROUND_ENTER_THRESHOLD) &&
         (right_leg_.GetForceNormal() < OFF_GROUND_ENTER_THRESHOLD);
-    if (GetOffGround() || jump_raw_unloaded) {
+    if (!jump_airborne_confirmed_) {
+      if (jump_raw_unloaded) {
+        if (jump_airborne_confirm_count_ < JUMP_AIRBORNE_CONFIRM_TICKS)
+          jump_airborne_confirm_count_++;
+      } else {
+        jump_airborne_confirm_count_ = 0U;
+      }
+      if (jump_airborne_confirm_count_ >= JUMP_AIRBORNE_CONFIRM_TICKS ||
+          GetOffGround()) {
+        jump_airborne_confirmed_ = true;
+      }
+    }
+    if (jump_airborne_confirmed_) {
       jump_liftoff_seen_ = true;
     }
   }
@@ -2955,81 +3741,123 @@ void balance_Chassis::JumpCalc() {
     // 阶段2：以完整起跳轴向力伸腿；轮子不是零力矩自由滚动，而是闭环锁零。
     left_ref = MAX_LEG_LENGTH;
     right_ref = MAX_LEG_LENGTH;
-    direct_leg_force = k_jump_force;
-    use_direct_leg_force = true;
+    direct_leg_force_l = k_jump_force;
+    direct_leg_force_r = k_jump_force;
+    override_leg_force_l = true;
+    override_leg_force_r = true;
 
-    if (left_leg_.GetLegLen() >=
-            (MAX_LEG_LENGTH - JUMP_EXTEND_LENGTH_TOLERANCE) &&
-        right_leg_.GetLegLen() >=
-            (MAX_LEG_LENGTH - JUMP_EXTEND_LENGTH_TOLERANCE)) {
-      if (jump_length_ready_count_ < JUMP_LENGTH_READY_TICKS) {
-        jump_length_ready_count_++;
-      }
-    } else {
-      jump_length_ready_count_ = 0;
-    }
-    // 伸腿阶段不得按固定时间提前结束。只有双腿都到达最大长度并连续
-    // 确认后才进入收腿；若机构卡滞则保持满力伸腿，由急停负责中断。
-    if (jump_length_ready_count_ >= JUMP_LENGTH_READY_TICKS) {
+    // Each leg latches independently after it reaches 0.40 m.  Rebound or a
+    // small left/right timing difference must not clear the other side's
+    // arrival, otherwise ASCEND can remain active indefinitely.
+    if (left_leg_.GetLegLen() >= JUMP_EXTEND_READY_LENGTH)
+      jump_extend_ready_l_ = true;
+    if (right_leg_.GetLegLen() >= JUMP_EXTEND_READY_LENGTH)
+      jump_extend_ready_r_ = true;
+    // No fixed-time escape is used: both legs must actually have reached the
+    // requested extension threshold before retract begins.
+    if (jump_extend_ready_l_ && jump_extend_ready_r_) {
       next_status = JUMP_RETRACT;
     }
     break;
 
   case JUMP_RETRACT: {
-    // 阶段3：直接施加收腿力，轮速和腿摆角继续锁定。
+    // Stage 3: retract each airborne leg independently.  If one leg reaches a
+    // stair first, hold that side compliantly and keep retracting the other;
+    // a unilateral contact must not terminate RETRACT.
     left_ref = JUMP_RETRACT_LENGTH;
     right_ref = JUMP_RETRACT_LENGTH;
 
-    if (left_leg_.GetLegLen() <=
-            (JUMP_RETRACT_LENGTH + JUMP_RETRACT_LENGTH_TOLERANCE) &&
+    const bool left_short =
+        left_leg_.GetLegLen() <=
+        (JUMP_RETRACT_LENGTH + JUMP_RETRACT_LENGTH_TOLERANCE);
+    const bool right_short =
         right_leg_.GetLegLen() <=
-            (JUMP_RETRACT_LENGTH + JUMP_RETRACT_LENGTH_TOLERANCE)) {
+        (JUMP_RETRACT_LENGTH + JUMP_RETRACT_LENGTH_TOLERANCE);
+    // Launch-force estimation remains high for several milliseconds after
+    // wheel lift-off. Do not interpret that transient as stair contact until
+    // both legs have been reliably unloaded and RETRACT has run for 40 ms.
+    const bool retract_contact_allowed =
+        jump_airborne_confirmed_ &&
+        jump_timer >= JUMP_RETRACT_CONTACT_BLANK_TICKS;
+    const bool left_retract_contact =
+        retract_contact_allowed && jump_left_contact_raw;
+    const bool right_retract_contact =
+        retract_contact_allowed && jump_right_contact_raw;
+
+    if (left_retract_contact && !jump_touchdown_capture_l_) {
+      jump_touchdown_capture_l_ = true;
+      jump_touchdown_ref_l_ = left_leg_.GetLegLen();
+    }
+    if (right_retract_contact && !jump_touchdown_capture_r_) {
+      jump_touchdown_capture_r_ = true;
+      jump_touchdown_ref_r_ = right_leg_.GetLegLen();
+    }
+
+    if (left_retract_contact) {
+      direct_leg_force_l = CalculateLandingImpedanceForce(
+          jump_touchdown_ref_l_, left_leg_.GetLegLen(),
+          left_leg_.GetLegSpeed(),
+          k_gravity_comp * arm_cos_f32(left_leg_.GetTheta()),
+          JUMP_LAND_IMPACT_KP, JUMP_LAND_IMPACT_KD,
+          JUMP_LAND_IMPACT_FORCE_MIN, JUMP_LAND_IMPACT_FORCE_MAX,
+          JUMP_LAND_SOFT_LIMIT, JUMP_LAND_SOFT_STOP_KP,
+          JUMP_LAND_SOFT_STOP_KD, true);
+      override_leg_force_l = true;
+    } else if (!left_short) {
+      direct_leg_force_l = left_leg_.GetLegLen() > k_retract_near_length
+                               ? k_retract_fast_force
+                               : k_retract_near_force;
+      override_leg_force_l = true;
+    }
+
+    if (right_retract_contact) {
+      direct_leg_force_r = CalculateLandingImpedanceForce(
+          jump_touchdown_ref_r_, right_leg_.GetLegLen(),
+          right_leg_.GetLegSpeed(),
+          k_gravity_comp * arm_cos_f32(right_leg_.GetTheta()),
+          JUMP_LAND_IMPACT_KP, JUMP_LAND_IMPACT_KD,
+          JUMP_LAND_IMPACT_FORCE_MIN, JUMP_LAND_IMPACT_FORCE_MAX,
+          JUMP_LAND_SOFT_LIMIT, JUMP_LAND_SOFT_STOP_KP,
+          JUMP_LAND_SOFT_STOP_KD, true);
+      override_leg_force_r = true;
+    } else if (!right_short) {
+      direct_leg_force_r = right_leg_.GetLegLen() > k_retract_near_length
+                                ? k_retract_fast_force
+                                : k_retract_near_force;
+      override_leg_force_r = true;
+    }
+
+    const bool left_retract_resolved = left_short || left_retract_contact;
+    const bool right_retract_resolved = right_short || right_retract_contact;
+    if (left_retract_resolved && right_retract_resolved) {
       if (jump_length_ready_count_ < JUMP_LENGTH_READY_TICKS) {
         jump_length_ready_count_++;
       }
-      if (jump_length_ready_count_ >= JUMP_LENGTH_READY_TICKS &&
-          jump_retract_hold_count_ < JUMP_RETRACT_AT_LENGTH_HOLD_TICKS) {
-        jump_retract_hold_count_++;
-      }
     } else {
       jump_length_ready_count_ = 0;
-      jump_retract_hold_count_ = 0;
-      // Use the larger force through the long airborne stroke, then soften
-      // the final 5 cm so the mechanism reaches 0.20 m quickly without
-      // slamming into the compact-length target.
-      const float longest_leg =
-          left_leg_.GetLegLen() > right_leg_.GetLegLen()
-              ? left_leg_.GetLegLen()
-              : right_leg_.GetLegLen();
-      direct_leg_force = longest_leg > k_retract_near_length
-                             ? k_retract_fast_force
-                             : k_retract_near_force;
-      use_direct_leg_force = true;
     }
 
-    // Do not wait for ground contact at minimum leg length: after a short
-    // compact-flight interval, deploy the legs before the first impact.
-    const bool unexpected_early_contact =
-        (left_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD) ||
-        (right_leg_.GetForceNormal() > OFF_GROUND_EXIT_THRESHOLD);
-    if ((jump_retract_hold_count_ >= JUMP_RETRACT_AT_LENGTH_HOLD_TICKS &&
-         jump_liftoff_seen_) ||
-        unexpected_early_contact) {
-      next_status = JUMP_LAND_PREP;
+    // No extra airborne hold after retraction. Keep only the short arrival
+    // confirmation used to reject a single noisy length sample, then hand the
+    // confirmed airborne robot directly to NORMAL. ChangeState() preserves the
+    // off-ground flag and suppresses the grounded 250 ms jump hand-off; NORMAL
+    // therefore deploys the legs with its own off-ground controller and uses
+    // its existing touchdown detector when support returns.
+    if (jump_length_ready_count_ >= JUMP_LENGTH_READY_TICKS &&
+        jump_liftoff_seen_) {
+      next_status = JUMP_NONE;
     }
     break;
   }
 
   case JUMP_LAND_PREP: {
-    // Extend progressively to a protected landing geometry. A bounded virtual
-    // spring-damper absorbs compression instead of commanding the 220 N launch
-    // force or allowing the chassis structure to touch down on folded legs.
-    const float landing_ref = ClampRange(
-        JUMP_RETRACT_LENGTH +
-            JUMP_LAND_PREP_SLEW_PER_TICK * (float)jump_timer,
-        JUMP_RETRACT_LENGTH, JUMP_LAND_PREP_LENGTH);
-    left_ref = landing_ref;
-    right_ref = landing_ref;
+    // Airborne deployment only.  The reference is continuous across all
+    // landing substates so a first contact cannot create a length command step.
+    jump_land_deploy_ref_ = SlewTowards(
+        jump_land_deploy_ref_, JUMP_LAND_PREP_LENGTH,
+        JUMP_LAND_PREP_SLEW_PER_TICK);
+    left_ref = jump_land_deploy_ref_;
+    right_ref = jump_land_deploy_ref_;
     left_leg_F_ = ClampRange(
         JUMP_LAND_PREP_KP * (left_ref - left_leg_.GetLegLen()) -
             JUMP_LAND_PREP_KD * left_leg_.GetLegSpeed(),
@@ -3039,25 +3867,110 @@ void balance_Chassis::JumpCalc() {
             JUMP_LAND_PREP_KD * right_leg_.GetLegSpeed(),
         JUMP_LAND_PREP_FORCE_MIN, JUMP_LAND_PREP_FORCE_MAX);
     use_landing_leg_force = true;
+    if (jump_left_contact_raw || jump_right_contact_raw)
+      next_status = JUMP_LAND_IMPACT;
+    break;
+  }
 
-    // A stair-edge impact on only one wheel is not a stable landing. Require
-    // both legs to carry load continuously after the global contact debounce.
+  case JUMP_LAND_IMPACT: {
+    // Absorb the first-contact leg independently.  The other leg keeps
+    // deploying toward the protected geometry until it reaches the ground.
+    jump_land_deploy_ref_ = SlewTowards(
+        jump_land_deploy_ref_, JUMP_LAND_PREP_LENGTH,
+        JUMP_LAND_PREP_SLEW_PER_TICK);
+    const bool left_impact = jump_left_contact_raw || jump_left_supported;
+    const bool right_impact = jump_right_contact_raw || jump_right_supported;
+    left_ref = left_impact && jump_touchdown_capture_l_
+                   ? jump_touchdown_ref_l_
+                   : jump_land_deploy_ref_;
+    right_ref = right_impact && jump_touchdown_capture_r_
+                    ? jump_touchdown_ref_r_
+                    : jump_land_deploy_ref_;
+    if (left_impact) {
+      left_leg_F_ = CalculateLandingImpedanceForce(
+          left_ref, left_leg_.GetLegLen(), left_leg_.GetLegSpeed(),
+          k_gravity_comp * arm_cos_f32(left_leg_.GetTheta()),
+          JUMP_LAND_IMPACT_KP, JUMP_LAND_IMPACT_KD,
+          JUMP_LAND_IMPACT_FORCE_MIN, JUMP_LAND_IMPACT_FORCE_MAX,
+          JUMP_LAND_SOFT_LIMIT, JUMP_LAND_SOFT_STOP_KP,
+          JUMP_LAND_SOFT_STOP_KD, true);
+    } else {
+      left_leg_F_ = ClampRange(
+          JUMP_LAND_PREP_KP * (left_ref - left_leg_.GetLegLen()) -
+              JUMP_LAND_PREP_KD * left_leg_.GetLegSpeed(),
+          JUMP_LAND_PREP_FORCE_MIN, JUMP_LAND_PREP_FORCE_MAX);
+    }
+    if (right_impact) {
+      right_leg_F_ = CalculateLandingImpedanceForce(
+          right_ref, right_leg_.GetLegLen(), right_leg_.GetLegSpeed(),
+          k_gravity_comp * arm_cos_f32(right_leg_.GetTheta()),
+          JUMP_LAND_IMPACT_KP, JUMP_LAND_IMPACT_KD,
+          JUMP_LAND_IMPACT_FORCE_MIN, JUMP_LAND_IMPACT_FORCE_MAX,
+          JUMP_LAND_SOFT_LIMIT, JUMP_LAND_SOFT_STOP_KP,
+          JUMP_LAND_SOFT_STOP_KD, true);
+    } else {
+      right_leg_F_ = ClampRange(
+          JUMP_LAND_PREP_KP * (right_ref - right_leg_.GetLegLen()) -
+              JUMP_LAND_PREP_KD * right_leg_.GetLegSpeed(),
+          JUMP_LAND_PREP_FORCE_MIN, JUMP_LAND_PREP_FORCE_MAX);
+    }
+    use_landing_leg_force = true;
+    if (jump_both_supported)
+      next_status = JUMP_LAND_SETTLE;
+    break;
+  }
+
+  case JUMP_LAND_SETTLE: {
+    // Both legs now use the same compliant impact absorber as NORMAL's
+    // step-down path, but with jump-only gains and independent state storage.
+    left_ref = jump_touchdown_capture_l_ ? jump_touchdown_ref_l_
+                                         : left_leg_.GetLegLen();
+    right_ref = jump_touchdown_capture_r_ ? jump_touchdown_ref_r_
+                                           : right_leg_.GetLegLen();
+    left_leg_F_ = CalculateLandingImpedanceForce(
+        left_ref, left_leg_.GetLegLen(), left_leg_.GetLegSpeed(),
+        k_gravity_comp * arm_cos_f32(left_leg_.GetTheta()),
+        JUMP_LAND_IMPACT_KP, JUMP_LAND_IMPACT_KD,
+        JUMP_LAND_IMPACT_FORCE_MIN, JUMP_LAND_IMPACT_FORCE_MAX,
+        JUMP_LAND_SOFT_LIMIT, JUMP_LAND_SOFT_STOP_KP,
+        JUMP_LAND_SOFT_STOP_KD, jump_left_supported);
+    right_leg_F_ = CalculateLandingImpedanceForce(
+        right_ref, right_leg_.GetLegLen(), right_leg_.GetLegSpeed(),
+        k_gravity_comp * arm_cos_f32(right_leg_.GetTheta()),
+        JUMP_LAND_IMPACT_KP, JUMP_LAND_IMPACT_KD,
+        JUMP_LAND_IMPACT_FORCE_MIN, JUMP_LAND_IMPACT_FORCE_MAX,
+        JUMP_LAND_SOFT_LIMIT, JUMP_LAND_SOFT_STOP_KP,
+        JUMP_LAND_SOFT_STOP_KD, jump_right_supported);
+    use_landing_leg_force = true;
+
     const float landing_chassis_speed =
         0.5f * (right_wheel.Get_Now_Omega() -
                 left_wheel.Get_Now_Omega());
-    const bool landing_speed_ready =
-        fabsf(landing_chassis_speed) <= JUMP_LAND_EXIT_CHASSIS_SPEED;
-    if (jump_both_contact_latched_ && landing_speed_ready) {
-      if (jump_landing_ready_count_ < JUMP_LANDING_CONFIRM_TICKS) {
+    const bool lengths_safe =
+        left_leg_.GetLegLen() >= JUMP_LAND_MIN_SAFE_LENGTH &&
+        right_leg_.GetLegLen() >= JUMP_LAND_MIN_SAFE_LENGTH;
+    const bool landing_stable =
+        jump_both_supported && lengths_safe &&
+        fabsf(left_leg_.GetLegSpeed()) <= JUMP_LAND_LEG_SPEED_OK &&
+        fabsf(right_leg_.GetLegSpeed()) <= JUMP_LAND_LEG_SPEED_OK &&
+        fabsf(INS.Pitch) <= JUMP_LAND_BODY_ANGLE_OK &&
+        fabsf(INS.Roll) <= JUMP_LAND_BODY_ANGLE_OK &&
+        fabsf(INS.Gyro[1]) <= JUMP_LAND_BODY_RATE_OK &&
+        fabsf(INS.Gyro[0]) <= JUMP_LAND_BODY_RATE_OK &&
+        fabsf(landing_chassis_speed) <= JUMP_LAND_SETTLE_CHASSIS_SPEED;
+    if (jump_timer >= JUMP_LAND_SETTLE_MIN_TICKS && landing_stable) {
+      if (jump_landing_ready_count_ < JUMP_LAND_SETTLE_STABLE_TICKS)
         jump_landing_ready_count_++;
-      }
     } else {
-      jump_landing_ready_count_ = 0;
+      jump_landing_ready_count_ = 0U;
     }
-    if (jump_liftoff_seen_ &&
-        jump_landing_ready_count_ >= JUMP_LANDING_CONFIRM_TICKS) {
+    const bool settle_complete =
+        jump_landing_ready_count_ >= JUMP_LAND_SETTLE_STABLE_TICKS;
+    // Remain in the jump-only landing controller until it is genuinely stable.
+    // A fixed timeout previously handed a still-moving robot to NORMAL and
+    // could turn the residual pitch correction into a rearward run-off.
+    if (jump_liftoff_seen_ && settle_complete)
       next_status = JUMP_NONE;
-    }
     break;
   }
 
@@ -3074,14 +3987,16 @@ void balance_Chassis::JumpCalc() {
   active_right_leg_ref_ = right_ref;
   LQRCalc();
   SynthesizeMotion();
-  if (use_direct_leg_force) {
-    // 本工程腿长是力控制而不是速度控制；直接使用完整轴向力等价于取消
-    // 腿长 PID 输出滤波/斜坡，以最快可用速度伸腿或收腿。
-    left_leg_F_ = direct_leg_force;
-    right_leg_F_ = direct_leg_force;
-  } else if (!use_landing_leg_force) {
+  if (!use_landing_leg_force) {
     LegLenCalc(left_ref, right_ref, left_ff, right_ff);
   }
+  // Jump-only per-leg force overrides bypass the filtered length PID. This
+  // lets the still-airborne side retract at full force while a contacted side
+  // remains compliant instead of ending the whole retract phase.
+  if (override_leg_force_l)
+    left_leg_F_ = direct_leg_force_l;
+  if (override_leg_force_r)
+    right_leg_F_ = direct_leg_force_r;
 
   if (current_status != JUMP_NONE) {
     float jump_dt = controller_dt_;
@@ -3105,7 +4020,12 @@ void balance_Chassis::JumpCalc() {
     jump_roll_integral_ = ClampAbs(
         jump_roll_integral_ - JUMP_ROLL_KI * INS.Roll * jump_dt,
         JUMP_ROLL_INTEGRAL_MAX);
-    const bool retract_pitch_control = current_status == JUMP_RETRACT;
+    // The waveform shows rearward pitch already accumulating in ASCEND.  As
+    // soon as lift-off is confirmed, use the same high-gain/rate-damped hip
+    // loop as RETRACT instead of waiting for the length state transition.
+    const bool retract_pitch_control =
+        current_status == JUMP_RETRACT ||
+        (current_status == JUMP_ASCEND && jump_liftoff_seen_);
     const float jump_pitch_kp =
         retract_pitch_control ? JUMP_RETRACT_PITCH_KP : JUMP_PITCH_KP;
     const float jump_pitch_kd =
@@ -3116,36 +4036,46 @@ void balance_Chassis::JumpCalc() {
         jump_pitch_kp * INS.Pitch + jump_pitch_kd * INS.Gyro[1] +
             jump_pitch_integral_,
         JUMP_PITCH_TORQUE_MAX);
+    const float jump_roll_force_limit =
+        jump_landing_phase && jump_either_supported
+            ? JUMP_LAND_ROLL_FORCE_MAX
+            : JUMP_ROLL_FORCE_MAX;
     const float jump_roll_force = ClampAbs(
         -JUMP_ROLL_KP * INS.Roll - JUMP_ROLL_KD * INS.Gyro[0] +
             jump_roll_integral_,
-        JUMP_ROLL_FORCE_MAX);
+        jump_roll_force_limit);
     left_leg_F_ += jump_roll_force;
     right_leg_F_ -= jump_roll_force;
 
-    // During launch/retract, phi0 remains a body-frame mechanism target.  In
-    // LAND_PREP the requirement is different: the leg must be vertical in the
-    // world/ground frame even if body pitch has not yet returned to zero.
-    // VMC defines theta = phi0 - pi/2 + body_pitch, hence theta=0 requires
-    // phi0_ref = pi/2 - body_pitch.
-    const bool landing_world_vertical = current_status == JUMP_LAND_PREP;
-    const float world_vertical_phi0_target = JUMP_PHI0_TARGET - INS.Pitch;
-    if (landing_world_vertical) {
-      const float left_ref_error = atan2f(
-          arm_sin_f32(world_vertical_phi0_target - jump_land_phi0_ref_l_),
-          arm_cos_f32(world_vertical_phi0_target - jump_land_phi0_ref_l_));
-      const float right_ref_error = atan2f(
-          arm_sin_f32(world_vertical_phi0_target - jump_land_phi0_ref_r_),
-          arm_cos_f32(world_vertical_phi0_target - jump_land_phi0_ref_r_));
-      jump_land_phi0_ref_l_ +=
-          ClampAbs(left_ref_error, JUMP_LAND_PHI0_REF_SLEW_PER_TICK);
-      jump_land_phi0_ref_r_ +=
-          ClampAbs(right_ref_error, JUMP_LAND_PHI0_REF_SLEW_PER_TICK);
+    // Once airborne, place both wheels ahead of or behind the chassis according
+    // to the forward speed captured at take-off. VMC defines
+    // theta = phi0 - pi/2 + body_pitch, therefore
+    // phi0_ref = pi/2 - body_pitch + theta_ref.
+    const bool airborne_world_angle_control =
+        jump_liftoff_seen_ || jump_landing_phase;
+    if (airborne_world_angle_control) {
+      const float airborne_theta_goal = ClampAbs(
+          AIRBORNE_LEG_FORWARD_SIGN * AIRBORNE_LEG_SPEED_ANGLE_GAIN *
+              jump_airborne_forward_speed_ref_,
+          AIRBORNE_LEG_ANGLE_MAX);
+      jump_airborne_theta_ref_ = SlewTowards(
+          jump_airborne_theta_ref_, airborne_theta_goal,
+          AIRBORNE_LEG_ANGLE_SLEW_PER_TICK);
+      const float airborne_phi0_target =
+          JUMP_PHI0_TARGET - INS.Pitch + jump_airborne_theta_ref_;
+      jump_land_phi0_ref_l_ = airborne_phi0_target;
+      jump_land_phi0_ref_r_ = airborne_phi0_target;
+    } else {
+      jump_airborne_theta_ref_ = SlewTowards(
+          jump_airborne_theta_ref_, 0.0f,
+          AIRBORNE_LEG_ANGLE_SLEW_PER_TICK);
     }
     const float left_phi0_target =
-        landing_world_vertical ? jump_land_phi0_ref_l_ : JUMP_PHI0_TARGET;
+        airborne_world_angle_control ? jump_land_phi0_ref_l_
+                                     : JUMP_PHI0_TARGET;
     const float right_phi0_target =
-        landing_world_vertical ? jump_land_phi0_ref_r_ : JUMP_PHI0_TARGET;
+        airborne_world_angle_control ? jump_land_phi0_ref_r_
+                                     : JUMP_PHI0_TARGET;
     const float left_phi0_error_raw =
         left_phi0_target - left_leg_.GetPhi0();
     const float right_phi0_error_raw =
@@ -3157,33 +4087,26 @@ void balance_Chassis::JumpCalc() {
         atan2f(arm_sin_f32(right_phi0_error_raw),
                arm_cos_f32(right_phi0_error_raw));
     // Damping must use the derivative of the same controlled coordinate.
-    // During landing that is world-frame theta_dot = phi0_dot + pitch_rate.
+    // In flight that is world-frame theta_dot = phi0_dot + pitch_rate.
     const float left_phi0_rate =
         left_leg_.GetPhi0Speed() +
-        (landing_world_vertical ? INS.Gyro[1] : 0.0f);
+        (airborne_world_angle_control ? INS.Gyro[1] : 0.0f);
     const float right_phi0_rate =
         right_leg_.GetPhi0Speed() +
-        (landing_world_vertical ? INS.Gyro[1] : 0.0f);
-    // Do not superimpose the body-pitch hip torque in LAND_PREP: it acts on
-    // the same common hip coordinate and would bias both legs away from the
-    // world-vertical reference.  The existing wheel-reference trim retains
-    // landing pitch authority without corrupting leg angle.
+        (airborne_world_angle_control ? INS.Gyro[1] : 0.0f);
+    // Do not superimpose body-pitch hip torque on the world-frame foot-placement
+    // coordinate. Reaction-wheel control retains airborne pitch authority.
     const float hip_pitch_torque =
-        landing_world_vertical ? 0.0f : jump_pitch_torque;
-    const float land_phi0_kp = jump_either_supported
-                                   ? JUMP_LAND_CONTACT_PHI0_KP
-                                   : JUMP_LAND_PHI0_KP;
-    const float land_phi0_kd = jump_either_supported
-                                   ? JUMP_LAND_CONTACT_PHI0_KD
-                                   : JUMP_LAND_PHI0_KD;
-    const float phi0_kp = landing_world_vertical ? land_phi0_kp : JUMP_PHI0_KP;
-    const float phi0_kd = landing_world_vertical ? land_phi0_kd : JUMP_PHI0_KD;
-    const float hip_torque_limit = landing_world_vertical
-                                       ? (jump_either_supported
-                                              ? JUMP_LAND_CONTACT_PHI0_TORQUE_MAX
-                                              : JUMP_LAND_PHI0_TORQUE_MAX)
-                                       : (JUMP_PHI0_TORQUE_MAX +
-                                          JUMP_PITCH_TORQUE_MAX);
+        airborne_world_angle_control ? 0.0f : jump_pitch_torque;
+    const float phi0_kp = airborne_world_angle_control
+                              ? AIRBORNE_LEG_ANGLE_KP
+                              : JUMP_PHI0_KP;
+    const float phi0_kd = airborne_world_angle_control
+                              ? AIRBORNE_LEG_ANGLE_KD
+                              : JUMP_PHI0_KD;
+    const float hip_torque_limit = airborne_world_angle_control
+                                       ? AIRBORNE_LEG_ANGLE_TORQUE_MAX
+                                       : JUMP_HIP_TORQUE_TOTAL_MAX;
     left_leg_T_ = ClampAbs(
         phi0_kp * left_phi0_error - phi0_kd * left_phi0_rate +
             hip_pitch_torque,
@@ -3196,7 +4119,7 @@ void balance_Chassis::JumpCalc() {
   }
 
   if (current_status == JUMP_ASCEND || current_status == JUMP_RETRACT ||
-      current_status == JUMP_LAND_PREP) {
+      jump_landing_phase) {
     float jump_dt = controller_dt_;
     if (jump_dt <= 0.0f || jump_dt > 0.02f) {
       jump_dt = 0.001f;
@@ -3208,10 +4131,17 @@ void balance_Chassis::JumpCalc() {
     const float left_omega = left_wheel.Get_Now_Omega();
     const float right_omega = right_wheel.Get_Now_Omega();
     // Preserve the captured translational wheel speed, but give the airborne
-    // pitch loop a small common reference trim. Negative pitch is the measured
-    // rearward body rotation, so it requests positive wheel acceleration and
-    // the corresponding forward reaction torque on the chassis.
-    const bool retract_wheel_pitch_control = current_status == JUMP_RETRACT;
+    // pitch loop a common motor-shaft reference trim. The follow-up waveform
+    // showed that the reversed sign drove both shafts negative together with
+    // the negative (rearward) pitch, so restore the reaction-wheel direction:
+    // negative pitch commands positive common shaft acceleration.
+    // Retraction and the still-airborne part of landing deployment both create
+    // large internal leg impulses while the hips are unavailable for body
+    // pitch correction. Keep the stronger, rate-damped wheel loop active until
+    // the first leg has genuinely made contact.
+    const bool retract_wheel_pitch_control =
+        current_status == JUMP_RETRACT ||
+        (jump_landing_phase && !jump_either_supported);
     const float wheel_pitch_ref_kp =
         retract_wheel_pitch_control ? JUMP_RETRACT_WHEEL_PITCH_REF_KP
                                     : JUMP_WHEEL_PITCH_REF_KP;
@@ -3221,13 +4151,28 @@ void balance_Chassis::JumpCalc() {
     const float wheel_pitch_ref_max =
         retract_wheel_pitch_control ? JUMP_RETRACT_WHEEL_PITCH_REF_MAX
                                     : JUMP_WHEEL_PITCH_REF_MAX;
+    if (retract_wheel_pitch_control) {
+      jump_wheel_pitch_ref_integral_ = ClampAbs(
+          jump_wheel_pitch_ref_integral_ -
+              JUMP_RETRACT_WHEEL_PITCH_REF_KI * INS.Pitch * jump_dt,
+          JUMP_RETRACT_WHEEL_PITCH_REF_I_MAX);
+    } else {
+      jump_wheel_pitch_ref_integral_ *= 0.80f;
+    }
     float pitch_speed_ref_trim = ClampAbs(
         -wheel_pitch_ref_kp * INS.Pitch -
-            wheel_pitch_ref_kd * INS.Gyro[1],
+            wheel_pitch_ref_kd * INS.Gyro[1] +
+            jump_wheel_pitch_ref_integral_,
         wheel_pitch_ref_max);
+    if (current_status == JUMP_ASCEND) {
+      // The 2 -> 1 edge captures both shaft speeds. During powered extension
+      // hold those values exactly; pitch correction starts only after ASCEND.
+      pitch_speed_ref_trim = 0.0f;
+      jump_wheel_pitch_ref_integral_ = 0.0f;
+    }
     float captured_speed_scale = 1.0f;
     float wheel_torque_limit = JUMP_WHEEL_TORQUE_MAX;
-    if (current_status == JUMP_LAND_PREP) {
+    if (jump_landing_phase) {
       // LAND_PREP never accelerates above the captured 2 -> 1 wheel speed.
       // Late in flight, pre-spin the wheels down modestly; raw first contact
       // starts a light brake immediately, while debounced contact permits a
@@ -3235,7 +4180,9 @@ void balance_Chassis::JumpCalc() {
       float landing_speed_scale_target = 1.0f;
       float landing_speed_slew = JUMP_LAND_FLIGHT_SPEED_SLEW;
       if (jump_both_contact_latched_) {
-        landing_speed_scale_target = 0.0f;
+        landing_speed_scale_target = jump_landing_pitch_ready_
+                                         ? 0.0f
+                                         : JUMP_LAND_FORWARD_HOLD_SCALE;
         landing_speed_slew = JUMP_LAND_BOTH_SPEED_SLEW;
       } else if (jump_either_supported) {
         landing_speed_scale_target = JUMP_LAND_SINGLE_CONTACT_SPEED_SCALE;
@@ -3267,15 +4214,38 @@ void balance_Chassis::JumpCalc() {
                      pitch_speed_ref_trim;
     float right_ref = captured_speed_scale * jump_wheel_speed_ref_r_ +
                       pitch_speed_ref_trim;
-    if (current_status == JUMP_LAND_PREP && jump_both_contact_latched_) {
-      // Start from the measured speeds at confirmed contact, then slew each
-      // reference to zero.  This removes the touchdown reference step.
-      jump_landing_brake_ref_l_ += ClampRange(
-          -jump_landing_brake_ref_l_, -JUMP_LAND_BRAKE_REF_SLEW,
-          JUMP_LAND_BRAKE_REF_SLEW);
-      jump_landing_brake_ref_r_ += ClampRange(
-          -jump_landing_brake_ref_r_, -JUMP_LAND_BRAKE_REF_SLEW,
-          JUMP_LAND_BRAKE_REF_SLEW);
+    if (jump_landing_phase && jump_both_contact_latched_) {
+      // Stage 1 retains a small part of the captured forward reference while
+      // pitch settles. Stage 2 slews to zero. If touchdown has already slowed
+      // a wheel below the hold target, never accelerate it back up.
+      float brake_target_l = jump_landing_pitch_ready_
+                                 ? 0.0f
+                                 : JUMP_LAND_FORWARD_HOLD_SCALE *
+                                       jump_wheel_speed_ref_l_;
+      float brake_target_r = jump_landing_pitch_ready_
+                                 ? 0.0f
+                                 : JUMP_LAND_FORWARD_HOLD_SCALE *
+                                       jump_wheel_speed_ref_r_;
+      if (!jump_landing_pitch_ready_) {
+        if (jump_wheel_speed_ref_l_ > 0.0f &&
+            jump_landing_brake_ref_l_ < brake_target_l)
+          brake_target_l = jump_landing_brake_ref_l_;
+        if (jump_wheel_speed_ref_l_ < 0.0f &&
+            jump_landing_brake_ref_l_ > brake_target_l)
+          brake_target_l = jump_landing_brake_ref_l_;
+        if (jump_wheel_speed_ref_r_ > 0.0f &&
+            jump_landing_brake_ref_r_ < brake_target_r)
+          brake_target_r = jump_landing_brake_ref_r_;
+        if (jump_wheel_speed_ref_r_ < 0.0f &&
+            jump_landing_brake_ref_r_ > brake_target_r)
+          brake_target_r = jump_landing_brake_ref_r_;
+      }
+      jump_landing_brake_ref_l_ =
+          SlewTowards(jump_landing_brake_ref_l_, brake_target_l,
+                      JUMP_LAND_BRAKE_REF_SLEW);
+      jump_landing_brake_ref_r_ =
+          SlewTowards(jump_landing_brake_ref_r_, brake_target_r,
+                      JUMP_LAND_BRAKE_REF_SLEW);
       // Keep a reduced differential-reaction pitch channel while the
       // translational references slew to zero.  This prevents stopping
       // distance improvements from sacrificing touchdown attitude control.
@@ -3288,10 +4258,12 @@ void balance_Chassis::JumpCalc() {
       // stop asking the speed loop for further translational braking on that
       // side. Track the measured speed and retain only the reduced pitch trim.
       const bool left_zero_crossed_now =
+          jump_landing_pitch_ready_ &&
           fabsf(jump_wheel_speed_ref_l_) >
               JUMP_LAND_BRAKE_ZERO_CROSS_SPEED &&
           left_omega * jump_wheel_speed_ref_l_ <= 0.0f;
       const bool right_zero_crossed_now =
+          jump_landing_pitch_ready_ &&
           fabsf(jump_wheel_speed_ref_r_) >
               JUMP_LAND_BRAKE_ZERO_CROSS_SPEED &&
           right_omega * jump_wheel_speed_ref_r_ <= 0.0f;
@@ -3310,9 +4282,11 @@ void balance_Chassis::JumpCalc() {
                     JUMP_LAND_BRAKE_PITCH_TRIM_SCALE * pitch_speed_ref_trim;
       }
     }
-    if (current_status == JUMP_LAND_PREP) {
-      // Pitch correction may reduce the captured reference, but must not turn
-      // it into a command in the opposite travel direction.
+    if (jump_landing_phase) {
+      // Once ground contact is possible, pitch correction may reduce the
+      // captured reference but must not command reverse travel. In RETRACT the
+      // wheels are airborne, so allowing a shaft reference to cross zero is
+      // necessary to preserve full reaction-wheel pitch authority.
       if (jump_wheel_speed_ref_l_ > 0.0f && left_ref < 0.0f)
         left_ref = 0.0f;
       if (jump_wheel_speed_ref_l_ < 0.0f && left_ref > 0.0f)
@@ -3329,9 +4303,10 @@ void balance_Chassis::JumpCalc() {
 
     // SetMotorTor() 会对左轮命令取反，因此两侧内部力矩符号不同；最终发给
     // 两个电机的都是与各自实测转速相反的制动力矩。
-    if (current_status == JUMP_LAND_PREP && jump_both_contact_latched_) {
+    if (jump_landing_phase && jump_both_contact_latched_) {
       jump_wheel_integral_l_ = 0.0f;
       jump_wheel_integral_r_ = 0.0f;
+      jump_wheel_pitch_ref_integral_ = 0.0f;
       l_wheel_T_ = ClampAbs(JUMP_LAND_BRAKE_SPEED_KP * left_speed_error,
                             JUMP_LAND_BRAKE_TORQUE_MAX);
       r_wheel_T_ = ClampAbs(-JUMP_LAND_BRAKE_SPEED_KP * right_speed_error,
@@ -3345,11 +4320,22 @@ void balance_Chassis::JumpCalc() {
           jump_wheel_integral_r_ -
               JUMP_WHEEL_SPEED_KI * right_speed_error * jump_dt,
           JUMP_WHEEL_INTEGRAL_MAX);
+      // Extension produces a repeatable positive common shaft acceleration
+      // and a simultaneous negative body-pitch impulse.  Waiting for a speed
+      // error makes the loop reach its limit only after that impulse has
+      // already rotated the body.  Apply an ASCEND-only common braking
+      // feed-forward while keeping both captured speed references unchanged.
+      // SetMotorTor() negates the left internal command, hence the opposite
+      // internal signs below produce the same negative physical motor torque.
+      const float ascend_wheel_hold_ff =
+          current_status == JUMP_ASCEND ? JUMP_ASCEND_WHEEL_HOLD_FF : 0.0f;
       l_wheel_T_ = ClampAbs(JUMP_WHEEL_SPEED_KP * left_speed_error +
-                                jump_wheel_integral_l_,
+                                jump_wheel_integral_l_ +
+                                ascend_wheel_hold_ff,
                             wheel_torque_limit);
       r_wheel_T_ = ClampAbs(-JUMP_WHEEL_SPEED_KP * right_speed_error +
-                                jump_wheel_integral_r_,
+                                jump_wheel_integral_r_ -
+                                ascend_wheel_hold_ff,
                             wheel_torque_limit);
     }
   }
@@ -3374,9 +4360,25 @@ void balance_Chassis::JumpCalc() {
       // angles so pitch compensation cannot create an entry step.
       jump_wheel_integral_l_ = 0.0f;
       jump_wheel_integral_r_ = 0.0f;
+      jump_wheel_pitch_ref_integral_ = 0.0f;
       jump_landing_speed_scale_ = 1.0f;
       jump_landing_zero_cross_l_ = false;
       jump_landing_zero_cross_r_ = false;
+      jump_landing_pitch_ready_count_ = 0U;
+      jump_landing_pitch_ready_ = false;
+      jump_left_contact_count_ = jump_right_contact_count_ = 0U;
+      jump_left_release_count_ = jump_right_release_count_ = 0U;
+      jump_left_blocked_count_ = jump_right_blocked_count_ = 0U;
+      jump_left_contact_ = jump_right_contact_ = false;
+      jump_left_blocked_contact_ = jump_right_blocked_contact_ = false;
+      jump_both_contact_latched_ = false;
+      jump_touchdown_capture_l_ = false;
+      jump_touchdown_capture_r_ = false;
+      jump_touchdown_ref_l_ = left_leg_.GetLegLen();
+      jump_touchdown_ref_r_ = right_leg_.GetLegLen();
+      jump_land_deploy_ref_ = ClampRange(
+          0.5f * (left_leg_.GetLegLen() + right_leg_.GetLegLen()),
+          JUMP_RETRACT_LENGTH, JUMP_LAND_PREP_LENGTH);
       jump_land_phi0_ref_l_ = left_leg_.GetPhi0();
       jump_land_phi0_ref_r_ = right_leg_.GetPhi0();
     }
@@ -3387,6 +4389,197 @@ void balance_Chassis::JumpCalc() {
       jump_roll_integral_ = 0.0f;
     }
   }
+}
+
+// ---------- 上台阶完整摆腿轨迹（让空间→收腿→顶腿 合并为一条连续曲线）----------
+// 由「全过程-优化6-顶腿.xlsx」动作段(源 idx2-422 共 421 点) 移动平均(窗5)平滑 + 线性重采样为 101 点，
+// 映射到 STEP_UP_DURATION 时长，StepUpTrajAt 线性插值回放。
+// φ0：1.595(轮在髋下) → 峰值 3.115(收腿后摆) → 1.539(回落)；l0：0.3656 → 峰值 0.4119(让空间) → 谷值 0.1320(收腿最短) → 0.1350(收腿保持)。
+static const float kStepUpPhi0Traj[STEP_UP_WAYPOINT_N] = {
+    1.59520f, 1.59792f, 1.60595f, 1.61934f, 1.63768f, 1.66056f, 1.68675f, 1.71580f,
+    1.75229f, 1.79399f, 1.83678f, 1.87903f, 1.92047f, 1.96076f, 2.00041f, 2.04109f,
+    2.08344f, 2.12772f, 2.17283f, 2.21797f, 2.26320f, 2.30842f, 2.35319f, 2.39727f,
+    2.44032f, 2.48218f, 2.52366f, 2.56489f, 2.60574f, 2.64635f, 2.68717f, 2.72822f,
+    2.76907f, 2.80991f, 2.85086f, 2.89135f, 2.93026f, 2.96654f, 3.00080f, 3.03315f,
+    3.06191f, 3.08394f, 3.09913f, 3.10893f, 3.11378f, 3.11472f, 3.11459f, 3.11296f,
+    3.10382f, 3.08791f, 3.06900f, 3.04550f, 3.01797f, 2.98784f, 2.95530f, 2.92037f,
+    2.88469f, 2.84831f, 2.81024f, 2.77072f, 2.73036f, 2.68896f, 2.64794f, 2.60741f,
+    2.57191f, 2.54466f, 2.52716f, 2.51781f, 2.51566f, 2.51570f, 2.51555f, 2.51553f,
+    2.51529f, 2.51308f, 2.50355f, 2.48686f, 2.46048f, 2.42608f, 2.39243f, 2.35590f,
+    2.31661f, 2.27397f, 2.22996f, 2.18435f, 2.13640f, 2.08601f, 2.03423f, 1.98240f,
+    1.93094f, 1.88081f, 1.83272f, 1.78667f, 1.74369f, 1.70400f, 1.66826f, 1.63579f,
+    1.60681f, 1.58135f, 1.56061f, 1.54556f, 1.53859f,
+};
+
+static const float kStepUpL0Traj[STEP_UP_WAYPOINT_N] = {
+    0.36561f, 0.36628f, 0.36822f, 0.37142f, 0.37575f, 0.38102f, 0.38687f, 0.39288f,
+    0.39821f, 0.40274f, 0.40648f, 0.40930f, 0.41098f, 0.41158f, 0.41164f, 0.41174f,
+    0.41185f, 0.41192f, 0.41192f, 0.41183f, 0.41171f, 0.41161f, 0.41154f, 0.41148f,
+    0.41143f, 0.41131f, 0.41118f, 0.41109f, 0.41095f, 0.41086f, 0.41074f, 0.41063f,
+    0.41037f, 0.40987f, 0.40901f, 0.40778f, 0.40624f, 0.40447f, 0.40245f, 0.40007f,
+    0.39712f, 0.39370f, 0.39040f, 0.38828f, 0.38722f, 0.38699f, 0.38697f, 0.38663f,
+    0.38461f, 0.38070f, 0.37409f, 0.36375f, 0.35026f, 0.33428f, 0.31629f, 0.29734f,
+    0.27804f, 0.25875f, 0.23987f, 0.22177f, 0.20461f, 0.18878f, 0.17545f, 0.16481f,
+    0.15623f, 0.14984f, 0.14585f, 0.14376f, 0.14328f, 0.14331f, 0.14329f, 0.14330f,
+    0.14327f, 0.14276f, 0.14068f, 0.13715f, 0.13393f, 0.13342f, 0.13349f, 0.13344f,
+    0.13340f, 0.13333f, 0.13310f, 0.13263f, 0.13215f, 0.13201f, 0.13208f, 0.13218f,
+    0.13233f, 0.13231f, 0.13231f, 0.13232f, 0.13237f, 0.13245f, 0.13268f, 0.13309f,
+    0.13371f, 0.13430f, 0.13476f, 0.13493f, 0.13502f,
+};
+
+// 轨迹查表（线性插值）：tick ∈ [0, duration)，traj 长 n 点，均匀映射到 duration 时长
+static float StepUpTrajAt(const float *traj, uint32_t n, uint32_t duration, uint32_t tick) {
+  const float u = (float)tick / (float)(duration - 1U);
+  const float x = u * (float)(n - 1);
+  int32_t i = (int32_t)x;
+  if (i < 0) i = 0;
+  if (i >= (int32_t)(n - 1)) {
+    return traj[n - 1];
+  }
+  const float f = x - (float)i;
+  return traj[i] * (1.0f - f) + traj[i + 1] * f;
+}
+
+/**
+ * @brief 重置上台阶子状态机
+ *
+ */
+void balance_Chassis::ResetStepUpState(){
+    step_up_status = STEP_UP_NONE;
+    step_up_timer = 0;
+    step_up_impact_cnt_ = 0;
+    step_up_state_ = false;
+}
+
+//上台阶完成的判断函数
+bool balance_Chassis::IsStepUpComplete() {
+    return step_up_status == STEP_UP_FINISH;//上台阶子状态切换到FINISH时判断上台阶行为结束
+}
+
+//上台阶到位判据：左右腿的摆角与腿长都进入目标容差内即判定到位
+bool balance_Chassis::StepUpTargetReached(float target_phi0, float target_l0) {
+  return fabsf(left_leg_.GetPhi0() - target_phi0) < STEP_UP_POS_ANGLE_TOL &&
+         fabsf(left_leg_.GetLegLen() - target_l0) < STEP_UP_POS_LEN_TOL &&
+         fabsf(right_leg_.GetPhi0() - target_phi0) < STEP_UP_POS_ANGLE_TOL &&
+         fabsf(right_leg_.GetLegLen() - target_l0) < STEP_UP_POS_LEN_TOL;
+}
+
+//上台阶撞击检测：使能开关(step_up_flag==2)打开 + 双腿已抬高到安全高度 + 前进中，
+//触发三信号（俯仰抖动 / 轮速骤降 / 轮扭矩）任一命中即去抖确认，判定撞击（断开 LQR 进入固定动作）。
+bool balance_Chassis::IsStepUpImpactDetected() {
+  // 每拍更新编码器中心轮速与帧间减速量（供判据与上位机标定使用，正=减速）
+  const float encoder_center_speed =
+      0.5f * (-left_wheel.Get_Now_Omega() + right_wheel.Get_Now_Omega()) *
+      k_wheel_radius;
+  step_up_wheel_decel_ = step_up_last_encoder_speed_ - encoder_center_speed;
+  step_up_last_encoder_speed_ = encoder_center_speed;
+
+  // 使能开关未打开，或不在 NORMAL，不检测
+  if ((uint8_t)sbus_rx_data.step_up_flag != 2 ||
+      robot_status != STATE_NORMAL) {
+    step_up_impact_cnt_ = 0;
+    return false;
+  }
+  // 双腿必须已抬高到安全高度（操作者主动抬高，作为预置条件）
+  if (left_leg_.GetLegLen() < STEP_UP_SAFE_LEN ||
+      right_leg_.GetLegLen() < STEP_UP_SAFE_LEN) {
+    step_up_impact_cnt_ = 0;
+    return false;
+  }
+  // 前进中才检测（静止/后退不触发）
+  if (vel_ < STEP_UP_IMPACT_MIN_SPEED) {
+    step_up_impact_cnt_ = 0;
+    return false;
+  }
+
+  // 触发信号（放宽：三选一命中即累计去抖；前置条件已滤掉大部分误触）
+  // 1) 抖动：俯仰角速度尖峰，撞击硬冲击直接反映在 IMU，无卡尔曼抹平
+  const bool pitch_jolt = fabsf(INS.Gyro[1]) > STEP_UP_IMPACT_GYRO_TH;
+  // 2) 速度差：轮速骤降（堵转）。vel_ 由轮速推出、堵转时也会掉，故改用编码器帧间减速度，
+  //    它直接反映轮子被别停，量值远大于正常驾驶减速。
+  const bool wheel_stalled = step_up_wheel_decel_ > STEP_UP_IMPACT_STALL_DECEL_TH;
+  // 3) 扭矩：轮反馈扭矩之和（力矩模式反馈≈指令，较弱，作兜底）
+  const float wheel_torque =
+      fabsf(left_wheel.Get_Now_Torque()) + fabsf(right_wheel.Get_Now_Torque());
+  const bool torque_spike = wheel_torque > STEP_UP_IMPACT_TORQUE_TH;
+
+  if (pitch_jolt || wheel_stalled || torque_spike) {
+    if (step_up_impact_cnt_ < STEP_UP_IMPACT_CONFIRM_TICKS) {
+      step_up_impact_cnt_++;
+    }
+    return step_up_impact_cnt_ >= STEP_UP_IMPACT_CONFIRM_TICKS;
+  }
+  step_up_impact_cnt_ = 0;
+  return false;
+}
+
+/**
+ * @brief 上台阶控制（也要负责状态切换）
+ *
+ */
+void balance_Chassis::StepUpCalc() {
+    // 读取当前子状态
+    const StepUpStatus current_status = step_up_status;  // 保存当前这一拍执行时的上台阶子状态。
+    StepUpStatus next_status = current_status;           // 默认下一状态和当前状态一样，满足条件时在最后切换
+    // 固定动作目标（摆角 phi0 + 腿长 l0），按子状态设定
+    float target_phi0 = 0.0f;
+    float target_l0 = 0.0f;
+
+    // 单一连续轨迹回放：让空间→收腿→展腿 已合并为一条曲线，不再分子状态切段
+    switch (current_status) {
+      case STEP_UP_CLEAR_LEG:  // 复用为「正在播放」子状态，播完即完成
+        target_phi0 = StepUpTrajAt(kStepUpPhi0Traj, STEP_UP_WAYPOINT_N,
+                                   STEP_UP_DURATION, step_up_timer);
+        target_l0 = StepUpTrajAt(kStepUpL0Traj, STEP_UP_WAYPOINT_N,
+                                 STEP_UP_DURATION, step_up_timer);
+        step_up_timer++;
+        if (step_up_timer >= STEP_UP_DURATION) {
+          next_status = STEP_UP_FINISH;
+        }
+        break;
+
+      case STEP_UP_APPROACH: // 接近阶段已并入 NORMAL，不再单独执行
+      case STEP_UP_FINISH:   // 由状态机在 IsStepUpComplete 后切走
+      default:
+        break;
+    }
+
+    // 固定动作：IK + 关节角 LQR → 直接关节力矩（复用 RecoverLegJointLQR 输出链路）
+    float l1 = 0.0f, l2 = 0.0f, r1 = 0.0f, r2 = 0.0f;
+    RecoverLegJointLQR(left_leg_, target_phi0, target_l0, l1, l2);
+    RecoverLegJointLQR(right_leg_, target_phi0, target_l0, r1, r2);
+    left_leg_.SetDirectJointTor(l1, l2);
+    right_leg_.SetDirectJointTor(r1, r2);
+
+    // 轮速控制：按摆角/腿长两个一次性触发点分段
+    //   1) 初始：轮子以固定前进轮速转，靠摩擦力把车体往前顶；
+    //   2) 摆角 φ0 首次 > 2.32（后摆到位）：轮子停转（腿悬空/收腿，不再顶）；
+    //   3) 腿长 l0 首次 < 0.185（收腿到位）：轮子重新转，直到上台阶动作结束。
+    if (!step_up_wheel_stopped_ && target_phi0 > STEP_UP_WHEEL_STOP_PHI0) {
+      step_up_wheel_stopped_ = true;  // 摆角第一次越过阈值 → 锁存停转
+    }
+    if (step_up_wheel_stopped_ && !step_up_wheel_resumed_ && target_l0 < STEP_UP_WHEEL_RESUME_L0) {
+      step_up_wheel_resumed_ = true;  // 腿长第一次越过阈值 → 锁存恢复旋转
+    }
+    const bool wheel_on = !step_up_wheel_stopped_ || step_up_wheel_resumed_;
+    if (wheel_on) {
+      // 轮速 P 闭环：目标线速度 → 速度误差 → 扭矩（轮子为 M3508 扭矩模式，无内置速度伺服）
+      const float left_speed = -left_wheel.Get_Now_Omega() * k_wheel_radius;
+      const float right_speed = right_wheel.Get_Now_Omega() * k_wheel_radius;
+      l_wheel_T_ = ClampAbs(STEP_UP_WHEEL_SPEED_KP * (STEP_UP_WHEEL_SPEED - left_speed),
+                            STEP_UP_WHEEL_TORQUE_MAX);
+      r_wheel_T_ = ClampAbs(STEP_UP_WHEEL_SPEED_KP * (STEP_UP_WHEEL_SPEED - right_speed),
+                            STEP_UP_WHEEL_TORQUE_MAX);
+    } else {
+      l_wheel_T_ = 0.0f;
+      r_wheel_T_ = 0.0f;
+    }
+
+    // 真正切换状态（本拍输出全部生成完之后，再切换到下一子状态）
+    if (next_status != current_status) {
+      step_up_status = next_status;
+      step_up_timer = 0; // 切换状态，清空计时器
+    }
 }
 
 /**
@@ -3447,46 +4640,23 @@ void balance_Chassis::LQRCalc() {
       recover_mode && (recover_sub_status_ == RECOVER_BALANCE);
   const bool normal_yaw_external = (robot_status == STATE_NORMAL);
   const bool normal_mode = (robot_status == STATE_NORMAL);
-  const bool normal_translation_active =
-      normal_mode && (fabsf(target_speed_) > kTranslationCommandDeadband);
-  const bool normal_pivot = normal_mode && !normal_translation_active &&
-                            (fabsf(target_w_rotation_) > kYawCommandDeadband);
-  // A NORMAL pivot keeps the ordinary NORMAL LQR speed target and measured
-  // centre speed.  Yaw is external only in the differential coordinate; the
-  // LQR common-speed and pitch balance states remain unchanged.
+  // NORMAL uses one longitudinal/pitch/leg controller for the complete command
+  // plane.  Yaw is intentionally external to the 4x10 LQR because its yaw-rate
+  // columns also command equal-and-opposite hip torques.
   lqr_body_.SetSpeed(normal_mode ? normal_speed_ref_ : target_speed_);
-  // The calibrated NORMAL mechanical zero is fixed at 0.050 rad. Do not add a
-  // yaw/translation pitch feedforward: hardware data shows it as a persistent
-  // I0 offset while crossing terrain.
-  const float pivot_pitch_target_desired =
-      normal_mode ? kNormalPitchZeroOffset : 0.0f;
-  const float pitch_slew_step =
-      kPivotPitchFfSlew * ((controller_dt_ > 0.0f && controller_dt_ < 0.02f)
-                               ? controller_dt_
-                               : 0.001f);
-  if (normal_pivot) {
-    // Keep the pivot pitch reference exactly zero.  Integrating this reference
-    // changes the LQR common wheel torque and moved I2 to about -0.26 m/s even
-    // though yaw differential control was correct.
-    normal_pivot_pitch_target_ = kNormalPitchZeroOffset;
-  } else {
-    normal_pivot_pitch_target_ =
-        SlewTowards(normal_pivot_pitch_target_, pivot_pitch_target_desired,
-                    pitch_slew_step);
-  }
+  normal_pivot_pitch_target_ = normal_mode ? kNormalPitchTarget : 0.0f;
   lqr_body_.SetPitchTarget(normal_mode ? normal_pivot_pitch_target_ : 0.0f);
-  // NORMAL uses a small standstill bias to compensate the measured zero-input
-  // drift. A pivot still keeps it at zero because any common-speed bias moves
-  // the rotation centre off the axle.
+  // Use exactly the same continuously decaying bias as NormalCalc().  At zero
+  // input the dedicated midpoint loop owns the zero-speed equilibrium, so LQR
+  // must not request a competing +0.02 m/s forward speed.
   const float normal_bias_scale =
-      normal_translation_active
+      normal_mode
           ? ClampRange(fabsf(normal_speed_ref_) / kNormalSpeedBiasRampSpeed,
                        0.0f, 1.0f)
           : 0.0f;
   const float normal_speed_bias =
-      normal_translation_active
-          ? kNormalSpeedBias * normal_bias_scale
-          : ((normal_mode && !normal_pivot) ? kNormalZeroInputSpeedBias : 0.0f);
+      normal_mode ? kNormalSpeedBias * normal_bias_scale
+                  : kNormalZeroInputSpeedBias;
   lqr_body_.SetSpeedBias(normal_speed_bias);
   lqr_body_.SetDist(target_dist_);
   // Pivot yaw is handled after LQR in a dedicated differential-wheel loop.
@@ -3494,14 +4664,24 @@ void balance_Chassis::LQRCalc() {
   // from also modulating common wheel and leg torques (pitch disturbance).
   lqr_body_.SetRotation(normal_yaw_external ? 0.0f : target_rotation_);
   lqr_body_.SetWRotation(normal_yaw_external ? 0.0f : target_w_rotation_);
-  lqr_body_.SetPitchGainScale(
-      normal_pivot ? kNormalPivotPitchGainScale
-                   : (normal_mode ? kNormalDrivePitchGainScale : 1.0f));
+  lqr_body_.SetPitchGainScale(normal_mode ? kNormalDrivePitchGainScale : 1.0f);
+  // INS.Gyro remains true rad/s. Transform the fitted LQR body-rate gains so
+  // the X/Y unit migration does not multiply the established feedback by 57.3.
+  lqr_body_.SetBodyRateGainScale(DEGREE_2_RAD);
   // debug模式下，用机身pitch和gyro代替腿部数据
   float theta_l = debug_mode ? INS.Pitch : left_leg_.GetTheta();
   float theta_r = debug_mode ? INS.Pitch : right_leg_.GetTheta();
   float w_theta_l = debug_mode ? INS.Gyro[1] : left_leg_.GetDotTheta();
   float w_theta_r = debug_mode ? INS.Gyro[1] : right_leg_.GetDotTheta();
+  if (normal_mode) {
+    // LQR uses a zero theta reference. Translate only NORMAL's measurements so
+    // that zero error corresponds to phi0 = PI/2 - 0.04 rad. Recovery, jump
+    // and joint-debug retain their original leg-angle coordinates.
+    const float normal_leg_theta_target =
+        kNormalLegPhi0Target - 0.5f * PI;
+    theta_l -= normal_leg_theta_target;
+    theta_r -= normal_leg_theta_target;
+  }
   if (recover_center_mode) {
     // The leg PD, not wheel translation, must remove most of the remaining
     // phi0 error. Keep only a small leg-angle contribution for wheel capture;
@@ -3621,6 +4801,304 @@ void balance_Chassis::SynthesizeMotion() {
   r_wheel_T_ = lqr_body_.GetWheelTorR();
   left_leg_T_ = lqr_body_.GetLegTorL();
   right_leg_T_ = lqr_body_.GetLegTorR();
+}
+
+void balance_Chassis::ResetLeso() {
+  if (leso_active_ || leso_.IsInitialized()) {
+    leso_.Reset();
+  }
+  leso_active_ = false;
+  leso_wheel_compensation_gain_ = 0.0f;
+  leso_hip_compensation_gain_ = 0.0f;
+  leso_wheel_common_disturbance_ = 0.0f;
+  leso_hip_common_disturbance_ = 0.0f;
+  leso_wheel_disturbance_filtered_ = 0.0f;
+  leso_hip_disturbance_filtered_ = 0.0f;
+  leso_wheel_correction_ = 0.0f;
+  leso_hip_correction_ = 0.0f;
+  leso_distance_ = 0.0f;
+}
+
+void balance_Chassis::ResetRollLeso() {
+  roll_leso_active_ = false;
+  roll_leso_z1_ = 0.0f;
+  roll_leso_z2_ = 0.0f;
+  roll_leso_z3_ = 0.0f;
+  roll_leso_applied_force_ = 0.0f;
+  roll_leso_disturbance_filtered_ = 0.0f;
+  roll_leso_compensation_gain_ = 0.0f;
+  roll_leso_correction_ = 0.0f;
+}
+
+void balance_Chassis::ResetPitchLeso() {
+  pitch_leso_active_ = false;
+  pitch_leso_z1_ = 0.0f;
+  pitch_leso_z2_ = 0.0f;
+  pitch_leso_z3_ = 0.0f;
+  pitch_leso_applied_common_torque_ = 0.0f;
+  pitch_leso_disturbance_filtered_ = 0.0f;
+  pitch_leso_compensation_gain_ = 0.0f;
+  pitch_leso_correction_ = 0.0f;
+}
+
+float balance_Chassis::UpdatePitchLeso(bool enable, float pitch,
+                                       float pitch_rate) {
+  if (!enable) {
+    ResetPitchLeso();
+    return 0.0f;
+  }
+
+  if (!pitch_leso_active_) {
+    pitch_leso_z1_ = pitch;
+    pitch_leso_z2_ = pitch_rate;
+    pitch_leso_z3_ = 0.0f;
+    pitch_leso_applied_common_torque_ =
+        0.5f * (l_wheel_T_ + r_wheel_T_);
+    pitch_leso_active_ = true;
+    return 0.0f;
+  }
+
+  // Third-order linear ESO for the common-wheel-to-Pitch channel. Only the
+  // raw Pitch angle drives observer innovation; gyro rate is retained as the
+  // LQR damping measurement and as a bumpless observer initial condition.
+  const float observer_bandwidth = PITCH_LESO_BANDWIDTH_RAD_PER_SECOND;
+  const float beta1 = 3.0f * observer_bandwidth;
+  const float beta2 = 3.0f * observer_bandwidth * observer_bandwidth;
+  const float beta3 = observer_bandwidth * observer_bandwidth *
+                      observer_bandwidth;
+  const float innovation = pitch - pitch_leso_z1_;
+  const float z1_dot = pitch_leso_z2_ + beta1 * innovation;
+  const float z2_dot = pitch_leso_z3_ +
+                       PITCH_LESO_INPUT_GAIN *
+                           pitch_leso_applied_common_torque_ +
+                       beta2 * innovation;
+  const float z3_dot = beta3 * innovation;
+  pitch_leso_z1_ += controller_dt_ * z1_dot;
+  pitch_leso_z2_ += controller_dt_ * z2_dot;
+  pitch_leso_z3_ = ClampAbs(
+      pitch_leso_z3_ + controller_dt_ * z3_dot,
+      PITCH_LESO_DISTURBANCE_ACCEL_LIMIT);
+
+  const bool state_valid =
+      pitch_leso_z1_ == pitch_leso_z1_ &&
+      pitch_leso_z2_ == pitch_leso_z2_ &&
+      pitch_leso_z3_ == pitch_leso_z3_ && fabsf(pitch_leso_z1_) < 1.6f &&
+      fabsf(pitch_leso_z2_) < 30.0f &&
+      fabsf(pitch_leso_z3_) <= PITCH_LESO_DISTURBANCE_ACCEL_LIMIT;
+  if (!state_valid) {
+    ResetPitchLeso();
+    return 0.0f;
+  }
+
+  const float disturbance_lpf_alpha =
+      controller_dt_ / (PITCH_LESO_DISTURBANCE_LPF_TAU + controller_dt_);
+  pitch_leso_disturbance_filtered_ +=
+      disturbance_lpf_alpha *
+      (pitch_leso_z3_ - pitch_leso_disturbance_filtered_);
+  const float compensation_gain_target = PITCH_LESO_COMPENSATION_TARGET;
+  const float compensation_gain_slew =
+      (compensation_gain_target >= pitch_leso_compensation_gain_)
+          ? PITCH_LESO_COMPENSATION_RAMP_PER_SECOND
+          : PITCH_LESO_COMPENSATION_RELEASE_PER_SECOND;
+  pitch_leso_compensation_gain_ = SlewTowards(
+      pitch_leso_compensation_gain_, compensation_gain_target,
+      compensation_gain_slew * controller_dt_);
+
+  const float correction_target = ClampAbs(
+      -pitch_leso_compensation_gain_ * pitch_leso_disturbance_filtered_ /
+          PITCH_LESO_INPUT_GAIN,
+      PITCH_LESO_CORRECTION_LIMIT);
+  pitch_leso_correction_ = SlewTowards(
+      pitch_leso_correction_, correction_target,
+      PITCH_LESO_CORRECTION_SLEW_PER_SECOND * controller_dt_);
+  return pitch_leso_correction_;
+}
+
+float balance_Chassis::UpdateRollLeso(bool enable, float roll,
+                                      float roll_rate) {
+  if (!enable) {
+    ResetRollLeso();
+    return 0.0f;
+  }
+
+  if (!roll_leso_active_) {
+    roll_leso_z1_ = roll;
+    roll_leso_z2_ = roll_rate;
+    roll_leso_z3_ = 0.0f;
+    roll_leso_applied_force_ = roll_force_cmd_;
+    roll_leso_active_ = true;
+    return 0.0f;
+  }
+
+  // Third-order linear ESO for a second-order roll plant. The gyro remains the
+  // damping feedback measurement; the ESO uses Roll as its single output so it
+  // estimates one coherent low-frequency acceleration disturbance instead of
+  // differentiating gyro noise.
+  const float observer_bandwidth = ROLL_LESO_BANDWIDTH_RAD_PER_SECOND;
+  const float beta1 = 3.0f * observer_bandwidth;
+  const float beta2 = 3.0f * observer_bandwidth * observer_bandwidth;
+  const float beta3 = observer_bandwidth * observer_bandwidth *
+                      observer_bandwidth;
+  const float innovation = roll - roll_leso_z1_;
+  const float z1_dot = roll_leso_z2_ + beta1 * innovation;
+  const float z2_dot = roll_leso_z3_ +
+                       ROLL_LESO_INPUT_GAIN * roll_leso_applied_force_ +
+                       beta2 * innovation;
+  const float z3_dot = beta3 * innovation;
+  roll_leso_z1_ += controller_dt_ * z1_dot;
+  roll_leso_z2_ += controller_dt_ * z2_dot;
+  roll_leso_z3_ = ClampAbs(roll_leso_z3_ + controller_dt_ * z3_dot,
+                           ROLL_LESO_DISTURBANCE_ACCEL_LIMIT);
+
+  // NaN fails the self-equality checks; infinities and divergent finite states
+  // fail the explicit bounds. Any numerical fault removes compensation in the
+  // same sample and requires a clean reinitialisation on the next sample.
+  const bool state_valid =
+      roll_leso_z1_ == roll_leso_z1_ && roll_leso_z2_ == roll_leso_z2_ &&
+      roll_leso_z3_ == roll_leso_z3_ && fabsf(roll_leso_z1_) < 1.6f &&
+      fabsf(roll_leso_z2_) < 30.0f &&
+      fabsf(roll_leso_z3_) <= ROLL_LESO_DISTURBANCE_ACCEL_LIMIT;
+  if (!state_valid) {
+    ResetRollLeso();
+    return 0.0f;
+  }
+
+  const float disturbance_lpf_alpha =
+      controller_dt_ / (ROLL_LESO_DISTURBANCE_LPF_TAU + controller_dt_);
+  roll_leso_disturbance_filtered_ +=
+      disturbance_lpf_alpha *
+      (roll_leso_z3_ - roll_leso_disturbance_filtered_);
+  roll_leso_compensation_gain_ +=
+      ROLL_LESO_COMPENSATION_RAMP_PER_SECOND * controller_dt_;
+  if (roll_leso_compensation_gain_ > ROLL_LESO_COMPENSATION_TARGET) {
+    roll_leso_compensation_gain_ = ROLL_LESO_COMPENSATION_TARGET;
+  }
+
+  const float correction_target = ClampAbs(
+      -roll_leso_compensation_gain_ * roll_leso_disturbance_filtered_ /
+          ROLL_LESO_INPUT_GAIN,
+      ROLL_LESO_CORRECTION_LIMIT);
+  roll_leso_correction_ = SlewTowards(
+      roll_leso_correction_, correction_target,
+      ROLL_LESO_CORRECTION_SLEW_PER_SECOND * controller_dt_);
+  return roll_leso_correction_;
+}
+
+void balance_Chassis::ApplyLesoCompensation(bool enable) {
+  if (!enable) {
+    ResetLeso();
+    ResetPitchLeso();
+    return;
+  }
+
+  // NORMAL deliberately uses encoder-only axle-centre speed because vel_
+  // also contains leg-angle and body-pitch rates.  Feeding vel_ to LESO closed
+  // a positive loop: leg shake looked like translation, the observer produced
+  // a hip disturbance, and the compensation shook the legs again.  Integrate
+  // a matching private distance so the observer still preserves x_dot = v.
+  if (leso_active_) {
+    leso_distance_ += normal_wheel_center_speed_ * controller_dt_;
+  }
+  const float measurement[LESO_STATE_DIM] = {
+      leso_distance_,
+      normal_wheel_center_speed_,
+      rotation_,
+      INS.Gyro[2],
+      left_leg_.GetTheta(),
+      left_leg_.GetDotTheta(),
+      right_leg_.GetTheta(),
+      right_leg_.GetDotTheta(),
+      INS.Pitch,
+      INS.Gyro[1],
+  };
+
+  if (!leso_active_) {
+    leso_.Reset(measurement);
+    if (!leso_.IsInitialized()) {
+      ResetLeso();
+      return;
+    }
+    leso_active_ = true;
+    leso_wheel_compensation_gain_ = 0.0f;
+    leso_hip_compensation_gain_ = 0.0f;
+  }
+
+  leso_wheel_common_disturbance_ = leso_.GetWheelCommonDisturbance();
+  leso_hip_common_disturbance_ = leso_.GetHipCommonDisturbance();
+
+  const float disturbance_lpf_alpha =
+      controller_dt_ / (LESO_DISTURBANCE_LPF_TAU + controller_dt_);
+  leso_wheel_disturbance_filtered_ +=
+      disturbance_lpf_alpha * (leso_wheel_common_disturbance_ -
+                               leso_wheel_disturbance_filtered_);
+  leso_hip_disturbance_filtered_ +=
+      disturbance_lpf_alpha * (leso_hip_common_disturbance_ -
+                               leso_hip_disturbance_filtered_);
+
+  leso_wheel_compensation_gain_ +=
+      LESO_COMPENSATION_RAMP_PER_SECOND * controller_dt_;
+  if (leso_wheel_compensation_gain_ > LESO_WHEEL_COMPENSATION_TARGET) {
+    leso_wheel_compensation_gain_ = LESO_WHEEL_COMPENSATION_TARGET;
+  }
+  leso_hip_compensation_gain_ +=
+      LESO_COMPENSATION_RAMP_PER_SECOND * controller_dt_;
+  if (leso_hip_compensation_gain_ > LESO_HIP_COMPENSATION_TARGET) {
+    leso_hip_compensation_gain_ = LESO_HIP_COMPENSATION_TARGET;
+  }
+
+  // Keep the two matched common channels explicitly allocated: wheel
+  // disturbance compensation stays on the wheel pair, while the conservative
+  // hip disturbance correction supplements pitch only through the common hip
+  // pair. Differential yaw/roll paths remain owned by their existing loops.
+  // LESO wheel compensation is useful while translating, but the measured
+  // standstill trace showed that a residual correction sustained the forward
+  // limit cycle.  Fade it with the same slewed speed reference so it reaches
+  // exactly zero at idle without a release-step torque.
+  const float wheel_compensation_blend = ClampRange(
+      fabsf(normal_speed_ref_) / LESO_WHEEL_FULL_COMPENSATION_SPEED, 0.0f,
+      1.0f);
+  const float wheel_correction_target = ClampAbs(
+      wheel_compensation_blend * leso_wheel_compensation_gain_ *
+          leso_wheel_disturbance_filtered_,
+      LESO_WHEEL_COMMON_LIMIT);
+  const float hip_correction_target = ClampAbs(
+      leso_hip_compensation_gain_ * leso_hip_disturbance_filtered_,
+      LESO_HIP_COMMON_LIMIT);
+  leso_wheel_correction_ = SlewTowards(
+      leso_wheel_correction_, wheel_correction_target,
+      LESO_WHEEL_CORRECTION_SLEW_PER_SECOND * controller_dt_);
+  leso_hip_correction_ = SlewTowards(
+      leso_hip_correction_, hip_correction_target,
+      LESO_HIP_CORRECTION_SLEW_PER_SECOND * controller_dt_);
+  const float pitch_leso_correction =
+#if PITCH_LESO_COMPENSATION_ENABLE
+      UpdatePitchLeso(true, INS.Pitch, INS.Gyro[1]);
+#else
+      UpdatePitchLeso(false, INS.Pitch, INS.Gyro[1]);
+#endif
+
+  // Restore the established post-controller wheel path. Both observers add
+  // only equal left/right common corrections; the proven pivot allocator above
+  // remains responsible for common/differential authority before this point.
+  l_wheel_T_ = ClampAbs(l_wheel_T_ - leso_wheel_correction_ +
+                            pitch_leso_correction,
+                        kNormalWheelTorqueLimit);
+  r_wheel_T_ = ClampAbs(r_wheel_T_ - leso_wheel_correction_ +
+                            pitch_leso_correction,
+                        kNormalWheelTorqueLimit);
+  pitch_leso_applied_common_torque_ = 0.5f * (l_wheel_T_ + r_wheel_T_);
+  left_leg_T_ = ClampAbs(left_leg_T_ - leso_hip_correction_, 40.0f);
+  right_leg_T_ = ClampAbs(right_leg_T_ - leso_hip_correction_, 40.0f);
+
+  // Feed the observer the logical, saturated virtual inputs actually handed
+  // to the wheel plant and VMC. Hardware-specific left/right sign inversions
+  // are applied later in SetMotorTor() and are not part of the model input.
+  const float applied_input[LESO_INPUT_DIM] = {
+      l_wheel_T_, r_wheel_T_, left_leg_T_, right_leg_T_};
+  if (!leso_.Step(measurement, applied_input, left_leg_.GetLegLen(),
+                  right_leg_.GetLegLen())) {
+    ResetLeso();
+  }
 }
 
 /**
@@ -3820,8 +5298,8 @@ void balance_Chassis::SetLegLen() {
  * @param
  */
 void balance_Chassis::SetSpd() {
-  // Read translation first: the extra yaw shaping below is intentionally
-  // limited to an in-place NORMAL request.
+  // Translation and yaw are two simultaneous NORMAL inputs; zero translation
+  // plus non-zero yaw is not a separate chassis mode.
   target_speed_ = -sbus_rx_data.speed;
   if (fabsf(target_speed_) <= kTranslationCommandDeadband) {
     target_speed_ = 0.0f;
@@ -3838,18 +5316,16 @@ void balance_Chassis::SetSpd() {
     // than the speed entered by the remote controller.
     yaw_desired = sbus_rx_data.yaw_speed_mapped * kNormalYawRateScale;
     yaw_stick_requested = fabsf(yaw_desired) > kYawCommandDeadband;
-    if (fabsf(target_speed_) <= kTranslationCommandDeadband) {
-      float yaw_step = kNormalPivotYawRateAccel * 0.001f;
-      if (controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
-        yaw_step = kNormalPivotYawRateAccel * controller_dt_;
-      }
-      normal_pivot_yaw_rate_ref_ =
-          SlewTowards(normal_pivot_yaw_rate_ref_, yaw_desired, yaw_step);
-      target_w_rotation_ = normal_pivot_yaw_rate_ref_;
-    } else {
-      normal_pivot_yaw_rate_ref_ = yaw_desired;
-      target_w_rotation_ = yaw_desired;
+    float yaw_step = kNormalPivotYawRateAccel * 0.001f;
+    if (controller_dt_ > 0.0f && controller_dt_ < 0.02f) {
+      yaw_step = kNormalPivotYawRateAccel * controller_dt_;
     }
+    // Apply the same slew on entry, reversal and release.  In particular, do
+    // not overwrite this reference with zero on the stick-release edge; the
+    // unified wheel yaw loop must remain active while it brakes residual yaw.
+    normal_pivot_yaw_rate_ref_ =
+        SlewTowards(normal_pivot_yaw_rate_ref_, yaw_desired, yaw_step);
+    target_w_rotation_ = normal_pivot_yaw_rate_ref_;
   } else {
     normal_pivot_yaw_rate_ref_ = 0.0f;
     target_w_rotation_ = yaw_desired;
@@ -3859,28 +5335,6 @@ void balance_Chassis::SetSpd() {
   if (fabsf(target_speed_) <= kTranslationCommandDeadband)
     target_speed_ = 0.0f;
 
-  // At the turn-to-centre transition discard every NORMAL-only pivot state
-  // and latch the current pose.  No differential or common integral from the
-  // previous turn may enter the next straight-line command.
-  if (robot_status == STATE_NORMAL && !yaw_stick_requested &&
-      yaw_command_active_) {
-    target_w_rotation_ = 0.0f;
-    normal_pivot_yaw_rate_ref_ = 0.0f;
-    target_rotation_ = rotation_;
-    target_dist_ = dist_;
-    normal_pivot_yaw_torque_cmd_ = 0.0f;
-    normal_pivot_left_speed_integral_ = 0.0f;
-    normal_pivot_right_speed_integral_ = 0.0f;
-    normal_pivot_pitch_integral_ = 0.0f;
-    normal_pivot_center_prev_speed_ = 0.0f;
-    normal_pivot_leg_sync_force_ = 0.0f;
-    normal_pivot_leg_sync_integral_ = 0.0f;
-    normal_zero_speed_trim_torque_ = 0.0f;
-    roll_force_cmd_ = 0.0f;
-    normal_pivot_roll_integral_ = 0.0f;
-    roll_comp_.Clear();
-    yaw_command_active_ = false;
-  }
   // The stable build did not accumulate a position-return state. Keep this
   // reference on the measured position so normal motion is governed by the
   // fitted speed and attitude feedback without stored displacement energy.
@@ -3903,8 +5357,8 @@ void balance_Chassis::SetSpd() {
   if (yaw_requested) {
     yaw_command_active_ = true;
   } else {
-    target_w_rotation_ = 0.0f;
-    if (yaw_command_active_) {
+    if (yaw_command_active_ &&
+        fabsf(normal_pivot_yaw_rate_ref_) <= kYawCommandDeadband) {
       target_rotation_ = rotation_;
       yaw_command_active_ = false;
     }

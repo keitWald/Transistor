@@ -228,8 +228,9 @@ void StartVofaTask(void *argument) {
   for (;;) {
     vofaTask();
     // 独立于控制环发送：即使控制环异常（卡死/任务未创建），VOFA 仍持续出数据，
-    // 便于上位机诊断。发送频率 100Hz，单帧 32B@115200 约 2.8ms，不会挤占 DMA。
-    Vofa_JustFloat(Vofa.data, 16);
+    // 便于上位机诊断。10 路 JustFloat 在 115200 baud 下约 3.8 ms，
+    // 再延时 5 ms 后保持约 110 Hz，且该发送仍独立于 1 kHz 控制任务。
+    Vofa_JustFloat(Vofa.data, 10);
     osDelay(5);
   }
   /* USER CODE END StartVofaTask */
@@ -312,6 +313,8 @@ void StartControlLoopTask(void *argument) {
     // 4. 控制指令下发电机
     DM_MotorTask();   // 打包电机CAN协议
     WheelMotorTask(); // 发送CAN数据
+
+    SDM02Task(); // 仅在起跳前压缩准备阶段开启测距
 
     vofaTask(); // 仅刷新 VOFA 数据，发送由独立任务 VofaTask 完成
 

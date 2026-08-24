@@ -13,7 +13,7 @@ typedef struct {
   float roll;
   float yaw;
   float pitch;
-  float data[16];
+  float data[10];
 } Vofa_t;
 
 #ifdef __cplusplus

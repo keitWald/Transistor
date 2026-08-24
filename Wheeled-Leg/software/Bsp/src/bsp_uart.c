@@ -2,6 +2,7 @@
 #include "bsp_uart.h"
 #include "N100.h"
 #include "SBUS.h"
+#include "SDM02.h"
 #include "Saber_C3.h"
 #include "XRobot_IMU.h"
 #include "dm_imu.h"
@@ -95,6 +96,11 @@ void UartSendData(UART_HandleTypeDef *_phuart, uint8_t *_psend_buf,
  * @param Size Number of bytes received.
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
+
+  if (huart->Instance == USART10) {
+    SDM02_UartRxEventCallback(huart, Size);
+    return;
+  }
 
   // static uint8_t Saber_Montage_Flag = 0; //表示陀螺仪数据的拼接起点
 
@@ -258,6 +264,10 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART10) {
+    SDM02_UartErrorCallback(huart);
+    return;
+  }
   if (sbus_huart != NULL && huart->Instance == sbus_huart->Instance) {
     __HAL_UART_CLEAR_OREFLAG(huart);
     HAL_UART_AbortReceive(huart);

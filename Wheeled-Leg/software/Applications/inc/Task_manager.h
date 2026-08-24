@@ -10,6 +10,7 @@ extern void DM_MotorTask();
 extern void WheelMotorTask();
 extern void YawMotorTask();
 extern void ChassisTask();
+extern void SDM02Task();
 extern void boardCommunicateTask();
 extern void vofaTask();
 extern void ChassisInit();

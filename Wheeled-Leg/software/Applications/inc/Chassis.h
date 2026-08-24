@@ -5,6 +5,7 @@
 #include "M3508.h"
 #include "M6020_Motor.h"
 #include "kalman_filter.h"
+#include "leso.h"
 #include "lqr.h"
 #include "motor_pid.h"
 #include "pid.h"
@@ -18,6 +19,31 @@
 #define VEL_MEASURE_NOISE 1000
 #define ACC_PROCESS_NOISE 10
 #define ACC_MEASURE_NOISE 10000
+#define LESO_COMPENSATION_ENABLE 1
+#define LESO_WHEEL_COMPENSATION_TARGET 0.35f
+#define LESO_HIP_COMPENSATION_TARGET 0.05f
+#define LESO_COMPENSATION_RAMP_PER_SECOND 0.10f
+#define LESO_WHEEL_COMMON_LIMIT 3.0f
+#define LESO_HIP_COMMON_LIMIT 1.0f
+#define LESO_DISTURBANCE_LPF_TAU 0.050f
+#define LESO_WHEEL_FULL_COMPENSATION_SPEED 0.20f
+#define LESO_WHEEL_CORRECTION_SLEW_PER_SECOND 6.0f
+#define LESO_HIP_CORRECTION_SLEW_PER_SECOND 8.0f
+// Dedicated Pitch LESO: pitch_ddot = b0 * common_wheel_torque + disturbance.
+// The fitted full-order model gives about -3.35 rad/s^2 per N.m of equal
+// left/right wheel torque at the centre of the normal leg-length range.
+// Keep the raw INS.Pitch measurement: the mechanical pitch offset remains a
+// controller reference and is deliberately not removed from the observer.
+#define PITCH_LESO_COMPENSATION_ENABLE 1
+#define PITCH_LESO_INPUT_GAIN (-3.35f)
+#define PITCH_LESO_BANDWIDTH_RAD_PER_SECOND 25.132742f // 4 Hz
+#define PITCH_LESO_COMPENSATION_TARGET 0.05f
+#define PITCH_LESO_COMPENSATION_RAMP_PER_SECOND 0.10f
+#define PITCH_LESO_COMPENSATION_RELEASE_PER_SECOND 0.25f
+#define PITCH_LESO_DISTURBANCE_LPF_TAU 0.080f
+#define PITCH_LESO_DISTURBANCE_ACCEL_LIMIT 40.0f
+#define PITCH_LESO_CORRECTION_LIMIT 0.20f
+#define PITCH_LESO_CORRECTION_SLEW_PER_SECOND 2.0f
 #define MAX_LEG_LENGTH 0.43f
 #define MIN_LEG_LENGTH 0.23f
 #define Leg_Controller_LQR_FeedForward 5.4f
@@ -27,22 +53,57 @@
 #define LEG_FF_LEG_MASS 1.067f
 #define LEG_FF_LEG_MASS_RATIO 1.0f
 #define LEG_FF_WHEEL_TRACK 0.4f
-#define kNormalPitchZeroOffset 0.050f
-#define kNormalRollZeroOffset 0.006f
+// One calibrated NORMAL Pitch target for idle, translation and yaw. The IMU
+// layer removes yaw-axis lever-arm error before this controller sees Pitch.
+#define kNormalPitchTarget (-0.068f)
+// NORMAL-only leg swing target. VMC defines theta = phi0 - PI/2 + body_pitch;
+// shifting the theta measurement by +0.04 makes theta error zero at this phi0.
+#define kNormalLegPhi0Target (0.5f * PI - 0.04f)
+#define kNormalRollZeroOffset 0.0f
 // --- NORMAL状态roll补偿 ---
-#define kNormalRollKp 70.0f
-#define kNormalRollKi 90.0f
-#define kNormalRollKd 8.0f
+#define kNormalRollKp 65.0f
+#define kNormalRollKi 0.0f
+// Direct body-rate D gains below were tuned when GyroX/Y were erroneously
+// multiplied by DEGREE_2_RAD. Values are migrated to true rad/s while
+// preserving the established force/torque contribution.
+#define kNormalRollKd 0.279253f
 #define kNormalRollOutMax 40.0f
-#define kNormalRollIntegralMax 30.0f
-#define kNormalRollForceLpfAlpha 0.06f
+#define kNormalRollIntegralMax 0.0f
+#define kNormalRollForceLpfAlpha 0.12f
 #define kRollDeadBand 0.003f
+// True body Roll-rate activity threshold, rad/s. Unlike the empirical D gain,
+// this is a physical decision threshold and therefore is not rescaled to
+// reproduce the legacy mis-scaled GyroX signal.
+#define kRollRateActivityThreshold 0.01f
+// The differential axial-force plant is approximately
+//   roll_ddot = b0 * roll_force + disturbance.
+// b0 uses wheel_track / estimated_roll_inertia and is deliberately
+// conservative.
+#define ROLL_LESO_COMPENSATION_ENABLE 1
+#define ROLL_LESO_INPUT_GAIN 0.90f
+#define ROLL_LESO_BANDWIDTH_RAD_PER_SECOND 25.132742f // 4 Hz
+// Full matched-disturbance cancellation is approached over five seconds; the
+// 5 Hz observer, 50 ms LPF, slew limiter and +/-8 N clamp provide the safety
+// margin instead of leaving a permanent steady Roll error with partial gain.
+#define ROLL_LESO_COMPENSATION_TARGET 0.45f
+#define ROLL_LESO_COMPENSATION_RAMP_PER_SECOND 0.20f
+#define ROLL_LESO_DISTURBANCE_LPF_TAU 0.050f
+#define ROLL_LESO_DISTURBANCE_ACCEL_LIMIT 72.0f
+#define ROLL_LESO_CORRECTION_LIMIT 5.0f
+#define ROLL_LESO_CORRECTION_SLEW_PER_SECOND 18.0f
 #define kRecoverRollKp 220.0f
-#define kRecoverRollKd 24.0f
-#define kRollLenRateGain 0.025f
-#define kRollLenLpfAlpha 0.08f
-#define kRollLenGain 0.2f // roll角 → 腿长差增益 (≤ wheel_track/2)
-#define kRollLenMax 0.08f // roll腿长补偿限幅
+#define kRecoverRollKd 0.418879f
+// Direct ground-height geometry for arbitrary uneven terrain. The differential
+// force loop above handles fast Roll motion; this path reconstructs the static
+// left/right contact-height difference without terrain-confirm/exit memory.
+#define kRollLenDirection 1.0f
+#define kRollLenMax 0.100f                // half-difference; full mechanical range
+#define kRollLenTimeConstant 0.004f       // low-pass time constant, s
+#define kRollLenSlewPerSecond 0.500f      // half-difference rate; short leg <= 1 m/s
+#define kRollLenCommandDeadband 0.0015f   // hold steady terrain within 3 mm full diff
+#define kRollLenVelocityFfGain 50.0f      // cancel length-loop D lag, N/(m/s)
+#define kRollLenVelocityFfMax 35.0f       // NORMAL terrain-only force limit, N
+#define kRollTerrainHeightDeadband 0.001f // ignore sub-millimetre geometry noise
 #define kTranslationCommandDeadband 0.08f // m/s, after the SBUS ramp
 #define kYawCommandDeadband 0.02f         // rad/s, after the SBUS ramp
 // The wheel-torque path is recomposed into common (pitch + axle-centre speed)
@@ -73,6 +134,14 @@
 // wheel-speed error may accumulate after the stick returns to centre.
 #define kPivotYawTorqueMax 6.0f
 #define kPivotYawTorqueLpfAlpha 0.05f
+// After the stick is released the chassis still has yaw momentum.  Keep the
+// hip pair on its common (pitch) coordinate until both the IMU yaw rate and the
+// encoder differential speed have settled; otherwise the LQR leg rows can
+// command one leg forward and the other rearward during the mode hand-off.
+#define kPivotExitYawRateSettled 0.15f       // rad/s
+#define kPivotExitDiffSpeedSettled 0.04f     // m/s
+#define kPivotExitYawTorqueSettled 0.05f     // N.m
+#define kPivotExitLegDiffTorqueMax 0.0f       // N.m
 #define kPivotPitchKi 8.0f
 #define kPivotPitchIntegralMax 1.5f
 #define kNormalWheelSpeedLpfAlpha 0.08f
@@ -85,18 +154,35 @@
 #define kPivotRollYawRateFf 10.0f
 #define kPivotRollYawForceMax 12.0f
 #define kNormalPivotRollKp 100.0f
-#define kNormalPivotRollKi 260.0f
-#define kNormalPivotRollKd 14.0f
+#define kNormalPivotRollKi 0.0f
+#define kNormalPivotRollKd 0.244346f
 #define kNormalPivotRollForceMax 100.0f
-#define kNormalPivotRollIntegralMax 80.0f
+#define kNormalPivotRollIntegralMax 0.0f
 #define kNormalPivotRollForceLpfAlpha 0.10f
 #define kPivotRollFullLegDiff 0.003f
 #define kPivotRollCutoffLegDiff 0.010f
 #define kNormalSpeedBias 0.125f
-#define kNormalZeroInputSpeedBias 0.020f
+#define kNormalZeroInputSpeedBias 0.0f
 #define kNormalSpeedBiasRampSpeed 0.25f
-#define kNormalSpeedRefAccel 0.80f
-#define kNormalSpeedRefDecel 1.20f
+#define kNormalSpeedRefAccel 1.20f
+#define kNormalSpeedRefDecel 1.50f
+// Damped, jerk-limited second-stage speed reference. The maximum acceleration
+// and deceleration remain unchanged; only their rate of change is bounded so a
+// short stick tap cannot instantaneously flip the LQR reference acceleration.
+#define kNormalSpeedRefNaturalFrequency 6.0f
+#define kNormalSpeedRefDampingRatio 1.25f
+#define kNormalSpeedRefJerkLimit 3.0f
+// Fade the idle midpoint-speed P loop in continuously while the translation
+// reference finishes its deceleration. The old hard 0.03 m/s edge added a
+// common-wheel torque step while LQR still carried a non-zero speed target.
+#define kNormalZeroSpeedBlendStartRef 0.060f
+#define kNormalZeroSpeedBlendFullRef 0.005f
+// Do not engage the dedicated zero-speed loop merely because its reference has
+// reached zero. After a short pulse the physical axle may still be moving; the
+// ordinary LQR should brake it first. These thresholds provide a second smooth
+// gate from measured encoder midpoint speed.
+#define kNormalZeroSpeedBlendStartCenterSpeed 0.15f
+#define kNormalZeroSpeedBlendFullCenterSpeed 0.03f
 #define kNormalZeroSpeedKp 4.0f
 // NORMAL LQR retains its ordinary speed and pitch states during a pivot.  A
 // A firm midpoint P term stops common wheel speed before the trim can react;
@@ -109,7 +195,7 @@
 // The previous slow trim left a repeatable negative I2 residual at high yaw
 // rate. Allow more common-channel correction while the final 10 N.m wheel limit
 // and common-first saturation still protect balance.
-#define kPivotCenterIntegralMax 4.0f
+#define kPivotCenterIntegralMax 3.0f
 #define kPivotCenterSpeedTorqueMax 8.0f
 // Keep the pivot centre-speed loop bounded when pitch is displaced.  Full
 // authority couples into the pitch mode and causes a rapid I2 limit cycle.
@@ -150,25 +236,39 @@
 // the negative sign to pitch the body into the motion.  The small trim
 // integral is integrated with the opposite sign in Chassis.cpp so it cancels
 // the steady yaw-induced common offset instead of winding into a sawtooth.
-#define kNormalZeroSpeedKi 0.5f
-#define kNormalZeroSpeedIntegralMax 1.0f
+#define kNormalZeroSpeedKi 0.10f
+#define kNormalZeroSpeedIntegralMax 0.25f
+#define kNormalZeroSpeedIntegralEnableRef 0.005f
+#define kNormalZeroSpeedIntegralDeadband 0.004f
+#define kNormalZeroSpeedIntegralDelayTicks 300U
+#define kNormalZeroSpeedZeroCrossRetention 0.20f
 #define kNormalZeroSpeedTorqueMax 3.5f
 #define kNormalCenterLoopPitchFade (8.0f * DEGREE_2_RAD)
 #define kNormalCenterLoopMinScale 0.50f
 #define kNormalWheelTorqueLimit 10.0f
+// Generic straight-line load sharing for the two independently driven wheels.
+// It transfers a small amount of torque from the faster wheel to the slower
+// wheel without changing the operator speed target or adding terrain states.
+#define kNormalTranslationWheelSyncKp 2.0f // N.m per (m/s) wheel-speed error
+#define kNormalTranslationWheelSyncMax 2.0f
+#define kNormalTranslationWheelSyncLpfAlpha 0.04f // about 25 ms at 1 kHz
 #define kNormalPivotCommonTorqueLimit 8.0f
 #define kNormalDrivePitchGainScale 1.0f
-#define kNormalPivotPitchGainScale 2.0f
-// A small low-speed pitch support cancels the pivot drag seen on I2.  Cap it
-// before the high-speed region so it cannot become a nose-up command.
-#define kPivotPitchFf 0.05f
-#define kPivotPitchFfMax (1.0f * DEGREE_2_RAD)
-#define kPivotPitchFfSlew 0.12f // rad/s
 // At zero operator input the two hip mechanisms must not receive a large
 // opposing LQR torque.  Roll is controlled by differential axial support.
 #define kNormalIdleLegDiffTorqueMax 3.0f
+// Grounded NORMAL hip differential is rebuilt explicitly from the measured
+// left/right leg-angle mismatch.  At the 0.25 m hand-off length these gains
+// match the stable antisymmetric part of the fitted LQR (about 18/2), while the
+// 6 N.m ceiling prevents recovery residue or a bad contact estimate from
+// producing the former full-authority split command.
+#define kNormalHipSyncKp 18.0f
+#define kNormalHipSyncKd 2.0f
+#define kNormalHipSyncTorqueMax 6.0f
 #define kNormalLegSyncKp 160.0f
 #define kNormalLegSyncKd 8.0f
+#define kNormalYawLegSyncKp 260.0f
+#define kNormalYawLegSyncKd 12.0f
 #define kNormalLegSyncForceMax 12.0f
 #define kPivotStartCenterSpeed 0.04f
 #define kPivotFullCenterSpeed 0.10f
@@ -180,9 +280,9 @@
 #define kNormalPivotLegAngleKd 7.0f
 #define kNormalPivotLegAngleTorqueMax 12.0f
 #define kNormalPivotHipPitchKp 35.0f
-#define kNormalPivotHipPitchKi 60.0f
-#define kNormalPivotHipPitchKd 4.0f
-#define kNormalPivotHipPitchIntegralMax 10.0f
+#define kNormalPivotHipPitchKi 0.0f
+#define kNormalPivotHipPitchKd 0.0698132f
+#define kNormalPivotHipPitchIntegralMax 0.0f
 #define kNormalPivotHipPitchTorqueMax 16.0f
 // The hip feedforward is disabled: its quadratic high-speed component was the
 // source of the continuing nose-up bias.  Wheel/LQR pitch support remains.
@@ -278,6 +378,7 @@
 #define k_recover_sweep_sync_kd 4.0f
 #define k_recover_sweep_torque_max 30.0f
 #define k_recover_sweep_torque_slew_per_tick 0.08f
+// Body-rate state-machine thresholds are all expressed in true rad/s.
 #define k_recover_pose_capture_rate (15.0f * DEGREE_2_RAD)
 #define k_recover_pose_capture_hold 300
 #define k_recover_center_entry_len_max 0.20f
@@ -385,91 +486,180 @@
 #define OFF_GROUND_EXIT_THRESHOLD 30.0f  // either leg above this to exit
 #define OFF_GROUND_ENTER_TICKS 30U       // 30 ms confirmation at 1 kHz
 #define OFF_GROUND_EXIT_TICKS 10U        // fast landing confirmation
+// NORMAL airborne deployment after JUMP_RETRACT.  Use an unfiltered PD so the
+// legs reach the 0.40 m impact stroke before touchdown.  The force limit stays
+// below the 250 N powered ASCEND command.
+#define NORMAL_OFF_GROUND_EXTEND_KP 900.0f
+#define NORMAL_OFF_GROUND_EXTEND_KD 35.0f
+#define NORMAL_OFF_GROUND_FORCE_MIN (-30.0f)
+#define NORMAL_OFF_GROUND_FORCE_MAX 180.0f
+// World-frame airborne foot placement. Positive forward speed commands a
+// positive virtual-leg theta offset; reverse AIRBORNE_LEG_FORWARD_SIGN if the
+// first hardware trace shows the mechanism convention is opposite.
+#define AIRBORNE_LEG_FORWARD_SIGN 1.0f
+#define AIRBORNE_LEG_SPEED_ANGLE_GAIN 0.06f // rad per (m/s)
+#define AIRBORNE_LEG_ANGLE_MAX 0.12f        // about 6.9 degrees
+#define AIRBORNE_LEG_ANGLE_SLEW_PER_TICK 0.003f
+#define AIRBORNE_LEG_ANGLE_KP 80.0f
+#define AIRBORNE_LEG_ANGLE_KD 14.0f
+#define AIRBORNE_LEG_ANGLE_TORQUE_MAX 24.0f
+// NORMAL-only step-down touchdown absorber.  It is intentionally separate
+// from the jump landing controller and from the regular NORMAL leg PID.
+#define NORMAL_TOUCHDOWN_CONTACT_CONFIRM_TICKS 3U
+#define NORMAL_TOUCHDOWN_MIN_TICKS 150U
+#define NORMAL_TOUCHDOWN_STABLE_TICKS 100U
+#define NORMAL_TOUCHDOWN_MAX_TICKS 600U
+#define NORMAL_TOUCHDOWN_KP 320.0f
+#define NORMAL_TOUCHDOWN_KD 110.0f
+#define NORMAL_TOUCHDOWN_FORCE_MIN (-30.0f)
+#define NORMAL_TOUCHDOWN_FORCE_MAX 220.0f
+#define NORMAL_TOUCHDOWN_SOFT_LIMIT 0.27f
+#define NORMAL_TOUCHDOWN_SOFT_STOP_KP 1500.0f
+#define NORMAL_TOUCHDOWN_SOFT_STOP_KD 70.0f
+#define NORMAL_TOUCHDOWN_MIN_SAFE_LENGTH 0.25f
+#define NORMAL_TOUCHDOWN_LEG_SPEED_OK 0.05f
+#define NORMAL_TOUCHDOWN_BODY_RATE_OK 0.40f // rad/s
 // 跳跃阶段：轮速锁零、腿摆角锁定和腿长到位判定
-#define JUMP_WHEEL_SPEED_KP 1.10f         // N.m/(rad/s), jump-only motor speed loop P
-#define JUMP_WHEEL_SPEED_KI 35.0f         // N.m/(rad), jump-only motor speed loop I
-#define JUMP_WHEEL_TORQUE_MAX 4.8f        // N.m, below the 3508+C620 peak limit
-#define JUMP_WHEEL_INTEGRAL_MAX 2.5f      // N.m
-#define JUMP_ASCEND_WHEEL_SPEED_CAPTURE_SCALE 1.0f
-#define JUMP_WHEEL_PITCH_REF_KP 35.0f     // (rad/s)/rad
-#define JUMP_WHEEL_PITCH_REF_KD 4.0f      // (rad/s)/(rad/s)
-#define JUMP_WHEEL_PITCH_REF_MAX 30.0f    // max common speed-reference trim
+#define JUMP_WHEEL_SPEED_KP 1.10f  // N.m/(rad/s), jump-only motor speed loop P
+#define JUMP_WHEEL_SPEED_KI 35.0f  // N.m/(rad), jump-only motor speed loop I
+#define JUMP_WHEEL_TORQUE_MAX 4.8f // N.m, below the 3508+C620 peak limit
+#define JUMP_WHEEL_INTEGRAL_MAX 2.5f // N.m
+#define JUMP_ASCEND_WHEEL_HOLD_FF                                              \
+  3.5f // N.m, oppose measured launch reaction before speed error builds
+#define JUMP_ASCEND_WHEEL_SPEED_CAPTURE_SCALE 0.75f
+#define JUMP_WHEEL_PITCH_REF_KP 35.0f  // (rad/s)/rad
+#define JUMP_WHEEL_PITCH_REF_KD 0.0698132f // migrated to true body rad/s
+#define JUMP_WHEEL_PITCH_REF_MAX 30.0f // max common speed-reference trim
 #define JUMP_RETRACT_WHEEL_PITCH_REF_KP 55.0f
-#define JUMP_RETRACT_WHEEL_PITCH_REF_KD 7.0f
+#define JUMP_RETRACT_WHEEL_PITCH_REF_KD 0.174533f
+#define JUMP_RETRACT_WHEEL_PITCH_REF_KI 500.0f
+#define JUMP_RETRACT_WHEEL_PITCH_REF_I_MAX 20.0f
 #define JUMP_RETRACT_WHEEL_PITCH_REF_MAX 40.0f
 #define JUMP_LAND_FLIGHT_DECEL_START_TICKS 20U
 #define JUMP_LAND_FLIGHT_SPEED_SCALE 0.75f
 #define JUMP_LAND_FLIGHT_SPEED_SLEW 0.003f
-#define JUMP_LAND_WHEEL_TORQUE_MAX 2.5f   // limit landing braking reaction
+#define JUMP_LAND_WHEEL_TORQUE_MAX 2.5f // limit landing braking reaction
 #define JUMP_LAND_RAW_CONTACT_SPEED_SCALE 0.65f
 #define JUMP_LAND_RAW_CONTACT_SPEED_SLEW 0.010f
 #define JUMP_LAND_RAW_CONTACT_TORQUE_MAX 1.50f
 #define JUMP_LAND_SINGLE_CONTACT_SPEED_SCALE 0.55f
 #define JUMP_LAND_SINGLE_SPEED_SLEW 0.012f
 #define JUMP_LAND_BOTH_SPEED_SLEW 0.0125f
+#define JUMP_LAND_CONTACT_FORCE_THRESHOLD 18.0f
+#define JUMP_LAND_CONTACT_EXTENSION_SPEED_MAX 0.30f
 #define JUMP_LAND_CONTACT_CONFIRM_TICKS 10U
 #define JUMP_LAND_CONTACT_RELEASE_TICKS 20U
+#define DM_AUTO_REENABLE_RETRY_TICKS 10U
+#define DM_AUTO_REENABLE_MAX_ATTEMPTS 3U
+#define DM_AUTO_REENABLE_WAIT_TICKS 40U
+#define DM_AUTO_REENABLE_COOLDOWN_TICKS 100U
+#define JUMP_LAND_BLOCKED_ARM_TICKS 8U
+#define JUMP_LAND_BLOCKED_LENGTH_ERROR 0.030f
+#define JUMP_LAND_BLOCKED_SPEED_MAX 0.08f
+#define JUMP_LAND_BLOCKED_FORCE_SEED 5.0f
+#define JUMP_LAND_BLOCKED_CONFIRM_TICKS 4U
 #define JUMP_LAND_BRAKE_REF_SLEW 0.70f
 #define JUMP_LAND_BRAKE_SPEED_KP 0.22f
 #define JUMP_LAND_BRAKE_TORQUE_MAX 1.40f
 #define JUMP_LAND_BRAKE_PITCH_TRIM_SCALE 0.35f
 #define JUMP_LAND_BRAKE_ZERO_CROSS_SPEED 2.0f
+#define JUMP_LAND_FORWARD_HOLD_SCALE 0.30f
+#define JUMP_LAND_BRAKE_PITCH_READY_ANGLE 0.08f
+#define JUMP_LAND_BRAKE_PITCH_READY_RATE 0.50f // rad/s
+#define JUMP_LAND_BRAKE_PITCH_READY_TICKS 30U
 #define JUMP_LAND_EXIT_CHASSIS_SPEED 10.0f
 #define JUMP_PHI0_TARGET (0.5f * PI)
 #define JUMP_PHI0_KP 60.0f
 #define JUMP_PHI0_KD 6.0f
 #define JUMP_PHI0_TORQUE_MAX 18.0f
-#define JUMP_LAND_PHI0_KP 40.0f
-#define JUMP_LAND_PHI0_KD 10.0f
-#define JUMP_LAND_PHI0_TORQUE_MAX 12.0f
-#define JUMP_LAND_CONTACT_PHI0_KP 28.0f
-#define JUMP_LAND_CONTACT_PHI0_KD 14.0f
-#define JUMP_LAND_CONTACT_PHI0_TORQUE_MAX 8.0f
-#define JUMP_LAND_PHI0_REF_SLEW_PER_TICK 0.0025f
+#define JUMP_LAND_PHI0_KP 80.0f
+#define JUMP_LAND_PHI0_KD 14.0f
+#define JUMP_LAND_PHI0_TORQUE_MAX 24.0f
+#define JUMP_LAND_CONTACT_PHI0_KP 60.0f
+#define JUMP_LAND_CONTACT_PHI0_KD 18.0f
+#define JUMP_LAND_CONTACT_PHI0_TORQUE_MAX 20.0f
 #define JUMP_PITCH_KP 100.0f
 #define JUMP_PITCH_KI 70.0f
-#define JUMP_PITCH_KD 14.0f
-#define JUMP_AIR_PITCH_KD 22.0f
+#define JUMP_PITCH_KD 0.244346f
+#define JUMP_AIR_PITCH_KD 0.383972f
 #define JUMP_RETRACT_PITCH_KP 200.0f
-#define JUMP_RETRACT_PITCH_KD 42.0f
+#define JUMP_RETRACT_PITCH_KD 0.733038f
 #define JUMP_PITCH_INTEGRAL_MAX 8.0f
-#define JUMP_PITCH_TORQUE_MAX 28.0f
+#define JUMP_PITCH_TORQUE_MAX 35.0f
+#define JUMP_HIP_TORQUE_TOTAL_MAX 40.0f
 #define JUMP_ROLL_KP 180.0f
 #define JUMP_ROLL_KI 120.0f
-#define JUMP_ROLL_KD 20.0f
+#define JUMP_ROLL_KD 0.349066f
 #define JUMP_ROLL_INTEGRAL_MAX 20.0f
 #define JUMP_ROLL_FORCE_MAX 45.0f
-#define JUMP_EXTEND_LENGTH_TOLERANCE 0.0002f
+#define JUMP_EXTEND_READY_LENGTH 0.40f
 #define JUMP_COMPRESS_LENGTH 0.20f
-#define JUMP_RETRACT_LENGTH 0.20f
+#define JUMP_RETRACT_LENGTH 0.23f
 #define JUMP_RETRACT_LENGTH_TOLERANCE 0.010f
 #define JUMP_LENGTH_READY_TICKS 4U
-#define JUMP_RETRACT_AT_LENGTH_HOLD_TICKS 40U // hold 0.20 m after both legs arrive
+#define JUMP_AIRBORNE_CONFIRM_TICKS 10U
+#define JUMP_RETRACT_CONTACT_BLANK_TICKS 40U
 #define JUMP_LAND_PREP_LENGTH 0.32f
 #define JUMP_LAND_PREP_SLEW_PER_TICK 0.0015f
 #define JUMP_LAND_PREP_KP 350.0f
 #define JUMP_LAND_PREP_KD 28.0f
 #define JUMP_LAND_PREP_FORCE_MIN (-45.0f)
 #define JUMP_LAND_PREP_FORCE_MAX 100.0f
-#define JUMP_LANDING_CONFIRM_TICKS 80U
+#define JUMP_LAND_IMPACT_KP 300.0f
+#define JUMP_LAND_IMPACT_KD 90.0f
+#define JUMP_LAND_IMPACT_FORCE_MIN (-30.0f)
+#define JUMP_LAND_IMPACT_FORCE_MAX 180.0f
+#define JUMP_LAND_SOFT_LIMIT 0.27f
+#define JUMP_LAND_SOFT_STOP_KP 1200.0f
+#define JUMP_LAND_SOFT_STOP_KD 50.0f
+#define JUMP_LAND_MIN_SAFE_LENGTH 0.25f
+#define JUMP_LAND_LEG_SPEED_OK 0.05f
+#define JUMP_LAND_BODY_ANGLE_OK (5.0f * PI / 180.0f)
+#define JUMP_LAND_BODY_RATE_OK 0.40f // rad/s
+#define JUMP_LAND_SETTLE_CHASSIS_SPEED 6.0f
+#define JUMP_LAND_SETTLE_MIN_TICKS 150U
+#define JUMP_LAND_SETTLE_STABLE_TICKS 100U
+#define JUMP_LAND_SETTLE_MAX_TICKS 600U
+#define JUMP_LAND_ROLL_FORCE_MAX 30.0f
 #define JUMP_NORMAL_HANDOFF_TICKS 250U
 #define JUMP_NORMAL_WHEEL_RAMP_TICKS 100U
 #define JUMP_NORMAL_WHEEL_MIN_SCALE 0.45f
 #define DM_MANUAL_ENABLE_WAIT_TICKS 250U
+// ---- 上台阶（STEP_UP）参数 ----
+// #define STEP_UP_APPROACH_TIMEOUT 4000U
+#define STEP_UP_DURATION 2000U
+#define STEP_UP_WHEEL_ON_TICKS 2000U
+#define STEP_UP_WHEEL_SPEED 0.5f
+#define STEP_UP_WHEEL_SPEED_KP 4.0f
+#define STEP_UP_WHEEL_TORQUE_MAX 3.5f
+#define STEP_UP_WHEEL_STOP_PHI0 2.32f
+#define STEP_UP_WHEEL_RESUME_L0 0.185f
+#define STEP_UP_SAFE_LEN 0.38f
+#define STEP_UP_WAYPOINT_N 101
+#define STEP_UP_POS_ANGLE_TOL 0.05f
+#define STEP_UP_POS_LEN_TOL 0.01f
+#define STEP_UP_IMPACT_MIN_SPEED 0.3f
+#define STEP_UP_IMPACT_GYRO_TH 1.5f
+#define STEP_UP_IMPACT_STALL_DECEL_TH 0.03f
+#define STEP_UP_IMPACT_TORQUE_TH 3.0f
+#define STEP_UP_IMPACT_CONFIRM_TICKS 3U
 // 状态值约定（VOFA 上位机显示）：1=normal，2=recover
 enum RobotStatus {
   STATE_NORMAL = 1,
   STATE_RECOVERING = 2,
   STATE_JUMPING = 3,
   STATE_JOINT_DEBUG = 4,
-  STATE_ESTOP = 5
+  STATE_ESTOP = 5,
+  STATE_STEP_UP = 6 // 上台阶状态
 };
 enum JumpSubStatus {
   JUMP_NONE = 0,
   JUMP_COMPRESS,
   JUMP_ASCEND,
   JUMP_RETRACT,
-  JUMP_LAND_PREP
+  JUMP_LAND_PREP,
+  JUMP_LAND_IMPACT,
+  JUMP_LAND_SETTLE
 };
 enum RecoverSubStatus {
   RECOVER_SETTLE = 0,
@@ -477,6 +667,14 @@ enum RecoverSubStatus {
   RECOVER_SWEEP,
   RECOVER_CENTER_LEGS,
   RECOVER_BALANCE
+};
+enum StepUpStatus {
+  STEP_UP_NONE = 0,   // 未上台阶
+  STEP_UP_APPROACH,   // 接触台阶，断开 LQR（已并入 NORMAL）
+  STEP_UP_CLEAR_LEG,  // 让空间：腿角向后增大、腿长不变，为身体前翻腾出空间
+  STEP_UP_RETRACT_LEG,// 收腿：腿角继续向后增大、腿长收短，轮子悬空停转
+  STEP_UP_EXTEND_LEG, // 展腿：腿角向前减小、腿长增大，往前够落到台阶顶
+  STEP_UP_FINISH      // 结束标志，进入后清理子状态恢复 NONE
 };
 typedef struct Speed_ToCloud {
   float vx;
@@ -496,6 +694,7 @@ public:
   Vmc left_leg_, right_leg_;
   KalmanFilter_t kf, kf_l, kf_r;
   Lqr lqr_body_;
+  Leso leso_;
   Pid left_leg_len_, right_leg_len_, anti_crash_, roll_comp_, left_leg_phi0,
       right_leg_phi0, left_leg_phi0_speed_, right_leg_phi0_speed_;
   Speed_ToCloud speed_to_cloud;
@@ -544,9 +743,27 @@ public:
   float GetRightBodySpeed() { return right_v_body_; }
   float GetRollLengthCorrection() { return roll_len_delta_cmd_; }
   float GetNormalRollForceCmd() { return roll_force_cmd_; }
+  bool GetRollLesoActive() { return roll_leso_active_; }
+  float GetRollLesoGain() { return roll_leso_compensation_gain_; }
+  float GetRollLesoPdForce() { return roll_pd_force_; }
+  float GetRollLesoDisturbanceForce() {
+    return roll_leso_disturbance_filtered_ / ROLL_LESO_INPUT_GAIN;
+  }
+  float GetRollLesoCorrection() { return roll_leso_correction_; }
+  bool GetPitchLesoActive() { return pitch_leso_active_; }
+  float GetPitchLesoEstimatedPitch() { return pitch_leso_z1_; }
+  float GetPitchLesoEstimatedRate() { return pitch_leso_z2_; }
+  float GetPitchLesoDisturbanceTorque() {
+    return pitch_leso_disturbance_filtered_ / PITCH_LESO_INPUT_GAIN;
+  }
+  float GetPitchLesoCorrection() { return pitch_leso_correction_; }
   float GetNormalLegSyncForce() { return normal_pivot_leg_sync_force_; }
+  float GetNormalTranslationWheelSyncTorque() {
+    return normal_translation_wheel_sync_torque_;
+  }
   float GetNormalPivotCenterTrim() { return normal_pivot_center_trim_torque_; }
   float GetNormalPivotLeftCorr() { return normal_pivot_left_wheel_corr_; }
+  float GetNormalPivotPitchTarget() { return normal_pivot_pitch_target_; }
   float GetPositionError() { return target_dist_ - dist_; }
   float GetTargetYawRate() { return target_w_rotation_; }
   float GetHeadingError() { return target_rotation_ - rotation_; }
@@ -569,7 +786,10 @@ public:
     return 0.5f * (jump_active_wheel_ref_r_ - jump_active_wheel_ref_l_);
   }
   int GetJumpSubStatus() { return jump_status; }
+  int GetStepUpSubStatus() { return step_up_status; }
   uint32_t GetJumpLengthReadyCount() { return jump_length_ready_count_; }
+  uint32_t GetStepUpImpactCnt() { return step_up_impact_cnt_; }
+  float GetStepUpWheelDecel() { return step_up_wheel_decel_; }
   float GetRecoverLenRef() { return recover_dynamic_len_ref_; }
   float GetRecoverPhi0Ref();
   bool GetRecoverState() { return recover_state_; }
@@ -585,6 +805,7 @@ public:
   void NormalCalc();
   void RecoverCalc();
   void JumpCalc();
+  void StepUpCalc();
   void JointDebugCalc();
   bool GetOffGround() { return off_ground_; }
   bool GetJumpBothContactLatched() { return jump_both_contact_latched_; }
@@ -604,10 +825,50 @@ public:
   uint8_t GetDmFaultMask() { return dm_fault_latched_mask_; }
   uint8_t GetDmOfflineMask() { return dm_offline_latched_mask_; }
   uint8_t GetDmDisabledMask() { return dm_disabled_latched_mask_; }
+  bool GetLesoActive() { return leso_active_; }
+  float GetLesoCompensationGain() { return leso_wheel_compensation_gain_; }
+  float GetLesoHipCompensationGain() { return leso_hip_compensation_gain_; }
+  float GetLesoWheelCommonDisturbance() {
+    return leso_wheel_common_disturbance_;
+  }
+  float GetLesoHipCommonDisturbance() { return leso_hip_common_disturbance_; }
+  float GetLesoWheelCorrection() { return leso_wheel_correction_; }
+  float GetLesoHipCorrection() { return leso_hip_correction_; }
+  float GetNormalSpeedRef() { return normal_speed_ref_; }
+  float GetNormalSpeedRefRate() { return normal_speed_ref_rate_; }
+  float GetNormalLqrWheelCommonTorque() {
+    return normal_lqr_wheel_common_torque_;
+  }
+  float GetNormalZeroSpeedCorrection() { return normal_zero_speed_correction_; }
+  float GetNormalFinalWheelCommonTorque() {
+    return 0.5f * (l_wheel_T_ + r_wheel_T_);
+  }
+  float GetLqrCommonWheelSpeedContribution() {
+    return lqr_body_.GetCommonWheelSpeedContribution();
+  }
+  float GetLqrCommonWheelLegContribution() {
+    return lqr_body_.GetCommonWheelLegContribution();
+  }
+  float GetLqrCommonWheelLegAngleContribution() {
+    return lqr_body_.GetCommonWheelLegAngleContribution();
+  }
+  float GetLqrCommonWheelLegRateContribution() {
+    return lqr_body_.GetCommonWheelLegRateContribution();
+  }
+  float GetLqrCommonWheelPitchContribution() {
+    return lqr_body_.GetCommonWheelPitchContribution();
+  }
+  float GetLqrRawCommonWheelTorque() {
+    return lqr_body_.GetRawCommonWheelTorque();
+  }
 
 private:
   void ResetRecoverState();                // 重置起身状态相关标志
   void ResetJumpState();                   // 重置跳跃子状态机
+  void ResetStepUpState();                 // 重置上台阶子状态机
+  bool IsStepUpComplete();                 // 上台阶完成判定
+  bool IsStepUpImpactDetected();           // 上台阶撞击检测
+  bool StepUpTargetReached(float target_phi0, float target_l0); // 上台阶到位判据
   void ChangeState(RobotStatus new_state); // 统一处理状态切换动作
   void UpdateStateMachine();               // 只负责状态转移
   void UpdateCommandByState();             // 按状态刷新控制目标
@@ -616,7 +877,14 @@ private:
   uint8_t GetDmFaultMaskNow() const;
   uint8_t GetDmOfflineMaskNow() const;
   uint8_t GetDmDisabledMaskNow() const;
-  void SetJointDebugMotor();               // joint debug 模式的输出下发
+  void EnableAllJointMotors();
+  void ResetLeso();
+  void ApplyLesoCompensation(bool enable);
+  void ResetRollLeso();
+  float UpdateRollLeso(bool enable, float roll, float roll_rate);
+  void ResetPitchLeso();
+  float UpdatePitchLeso(bool enable, float pitch, float pitch_rate);
+  void SetJointDebugMotor(); // joint debug 模式的输出下发
   // 根据这条腿当前是在“身前”还是“身后”，设置髋关节 PID 目标和腿长参考。
   // 长路径前半段仅做一件事：把送给 PID 的 phi0 测量值加上 2pi。
   void ConfigureRecoverLegControl(float current_phi0, bool use_long_path,
@@ -635,6 +903,16 @@ private:
   float dtheta_b_filter_, dist_filter_, dphi_filter_;
   float jump_start_time_, jump_now_time_;
   uint32_t dwt_cnt_controller_;
+  bool leso_active_ = false;
+  float leso_wheel_compensation_gain_ = 0.0f;
+  float leso_hip_compensation_gain_ = 0.0f;
+  float leso_wheel_common_disturbance_ = 0.0f;
+  float leso_hip_common_disturbance_ = 0.0f;
+  float leso_wheel_disturbance_filtered_ = 0.0f;
+  float leso_hip_disturbance_filtered_ = 0.0f;
+  float leso_wheel_correction_ = 0.0f;
+  float leso_hip_correction_ = 0.0f;
+  float leso_distance_ = 0.0f;
   float joint_debug_lf_target_ = 0.0f;
   float joint_debug_lb_target_ = 0.0f;
   float joint_debug_rf_target_ = 0.0f;
@@ -687,18 +965,41 @@ private:
   float roll_force_cmd_ = 0.0f;
   float normal_pivot_roll_integral_ = 0.0f;
   float roll_len_delta_cmd_ = 0.0f;
+  bool roll_leso_active_ = false;
+  float roll_leso_z1_ = 0.0f;
+  float roll_leso_z2_ = 0.0f;
+  float roll_leso_z3_ = 0.0f;
+  float roll_leso_applied_force_ = 0.0f;
+  float roll_leso_disturbance_filtered_ = 0.0f;
+  float roll_leso_compensation_gain_ = 0.0f;
+  float roll_leso_correction_ = 0.0f;
+  float roll_pd_force_ = 0.0f;
+  bool pitch_leso_active_ = false;
+  float pitch_leso_z1_ = 0.0f;
+  float pitch_leso_z2_ = 0.0f;
+  float pitch_leso_z3_ = 0.0f;
+  float pitch_leso_applied_common_torque_ = 0.0f;
+  float pitch_leso_disturbance_filtered_ = 0.0f;
+  float pitch_leso_compensation_gain_ = 0.0f;
+  float pitch_leso_correction_ = 0.0f;
   float heading_last_ = 0.0f;
   bool heading_initialized_ = false;
   bool translation_command_active_ = false;
   bool yaw_command_active_ = false;
   float normal_pivot_yaw_rate_ref_ = 0.0f;
   float normal_pivot_yaw_torque_cmd_ = 0.0f;
+  float normal_translation_wheel_sync_torque_ = 0.0f;
   float normal_pivot_center_trim_torque_ = 0.0f;
   float normal_pivot_center_prev_speed_ = 0.0f;
   float normal_pivot_left_wheel_corr_ = 0.0f;
   float normal_pivot_pitch_target_ = 0.0f;
   float normal_zero_speed_trim_torque_ = 0.0f;
+  float normal_zero_speed_prev_speed_ = 0.0f;
+  uint32_t normal_zero_speed_integral_delay_count_ = 0U;
+  float normal_zero_speed_correction_ = 0.0f;
+  float normal_lqr_wheel_common_torque_ = 0.0f;
   float normal_speed_ref_ = 0.0f;
+  float normal_speed_ref_rate_ = 0.0f;
   float normal_wheel_center_speed_ = 0.0f;
   float normal_wheel_diff_speed_ = 0.0f;
   float normal_target_left_wheel_speed_ = 0.0f;
@@ -715,9 +1016,20 @@ private:
   RobotStatus robot_status;
   JumpSubStatus jump_status;
   RecoverSubStatus recover_sub_status_;
+  StepUpStatus step_up_status;
   bool off_ground_ = false;
   uint32_t off_ground_enter_count_ = 0;
   uint32_t off_ground_exit_count_ = 0;
+  bool normal_airborne_seen_ = false;
+  bool normal_touchdown_active_ = false;
+  bool normal_touchdown_left_contact_ = false;
+  bool normal_touchdown_right_contact_ = false;
+  uint16_t normal_touchdown_left_contact_count_ = 0;
+  uint16_t normal_touchdown_right_contact_count_ = 0;
+  uint32_t normal_touchdown_timer_ = 0;
+  uint32_t normal_touchdown_stable_count_ = 0;
+  float normal_touchdown_ref_l_ = OFF_GROUND_LEG_LENGTH;
+  float normal_touchdown_ref_r_ = OFF_GROUND_LEG_LENGTH;
   uint32_t recover_timer;
   uint32_t fall_detect_count_;
   uint32_t balance_count;
@@ -729,24 +1041,46 @@ private:
   uint32_t jump_length_ready_count_ = 0;
   uint32_t jump_retract_hold_count_ = 0;
   uint32_t jump_landing_ready_count_ = 0;
+  uint16_t jump_landing_pitch_ready_count_ = 0;
+  uint16_t jump_airborne_confirm_count_ = 0;
+  bool jump_extend_ready_l_ = false;
+  bool jump_extend_ready_r_ = false;
+  bool jump_airborne_confirmed_ = false;
+  bool jump_landing_pitch_ready_ = false;
   float jump_wheel_integral_l_ = 0.0f;
   float jump_wheel_integral_r_ = 0.0f;
+  float jump_wheel_pitch_ref_integral_ = 0.0f;
   float jump_wheel_speed_ref_l_ = 0.0f;
   float jump_wheel_speed_ref_r_ = 0.0f;
   float jump_active_wheel_ref_l_ = 0.0f;
   float jump_active_wheel_ref_r_ = 0.0f;
+  float jump_airborne_forward_speed_ref_ = 0.0f;
+  float jump_airborne_theta_ref_ = 0.0f;
   float jump_landing_speed_scale_ = 1.0f;
   float jump_land_phi0_ref_l_ = 0.0f;
   float jump_land_phi0_ref_r_ = 0.0f;
   float jump_landing_brake_ref_l_ = 0.0f;
   float jump_landing_brake_ref_r_ = 0.0f;
+  float jump_land_deploy_ref_ = JUMP_RETRACT_LENGTH;
+  float jump_touchdown_ref_l_ = JUMP_LAND_PREP_LENGTH;
+  float jump_touchdown_ref_r_ = JUMP_LAND_PREP_LENGTH;
   uint16_t jump_left_contact_count_ = 0;
   uint16_t jump_right_contact_count_ = 0;
   uint16_t jump_left_release_count_ = 0;
   uint16_t jump_right_release_count_ = 0;
+  uint16_t jump_left_blocked_count_ = 0;
+  uint16_t jump_right_blocked_count_ = 0;
+  uint16_t dm_auto_enable_wait_count_ = 0;
+  uint16_t dm_auto_enable_cooldown_count_ = 0;
+  uint8_t dm_auto_enable_attempts_ = 0;
+  bool dm_auto_enable_pending_ = false;
   bool jump_left_contact_ = false;
   bool jump_right_contact_ = false;
+  bool jump_left_blocked_contact_ = false;
+  bool jump_right_blocked_contact_ = false;
   bool jump_both_contact_latched_ = false;
+  bool jump_touchdown_capture_l_ = false;
+  bool jump_touchdown_capture_r_ = false;
   bool jump_landing_zero_cross_l_ = false;
   bool jump_landing_zero_cross_r_ = false;
   float jump_pitch_integral_ = 0.0f;
@@ -755,6 +1089,25 @@ private:
   float active_right_leg_ref_ = 0.0f;
   bool jump_liftoff_seen_ = false;
   uint32_t jump_normal_handoff_count_ = 0;
+  // Reaction-wheel continuation used only by an airborne JUMP -> NORMAL
+  // hand-off.  NORMAL's off-ground LQR intentionally has zero wheel rows, so
+  // these states preserve pitch authority until touchdown is confirmed.
+  bool normal_airborne_wheel_control_active_ = false;
+  float normal_airborne_wheel_ref_l_ = 0.0f;
+  float normal_airborne_wheel_ref_r_ = 0.0f;
+  float normal_airborne_wheel_integral_l_ = 0.0f;
+  float normal_airborne_wheel_integral_r_ = 0.0f;
+  float normal_airborne_pitch_ref_integral_ = 0.0f;
+  float normal_airborne_forward_speed_ref_ = 0.0f;
+  float normal_airborne_theta_ref_ = 0.0f;
+  uint32_t step_up_timer = 0;
+  uint32_t step_up_impact_cnt_ = 0;
+  bool step_up_state_ = false;
+  uint8_t last_step_up_flag_ = 0;
+  bool step_up_wheel_stopped_ = false;
+  bool step_up_wheel_resumed_ = false;
+  float step_up_last_encoder_speed_ = 0.0f;
+  float step_up_wheel_decel_ = 0.0f;
   uint32_t warming_counter_;     // 倒地阻尼计数器
   uint32_t recover_balance_cnt_; // 起身平衡检测计数器
   float recover_yaw_target_;     // 起身目标朝向（进 RECOVERING 时锁定 INS.Yaw）
@@ -766,7 +1119,8 @@ private:
   float recover_capture_pitch_sign_;
   uint32_t recover_pose_lost_count_;
   uint32_t recover_sbus_lost_count_;
-  uint8_t estop_reason_; // 1=SBUS, 2=remote, 3=timeout, 4=fault, 5=offline, 6=disabled
+  uint8_t estop_reason_; // 1=SBUS, 2=remote, 3=timeout, 4=fault, 5=offline,
+                         // 6=disabled
   uint8_t dm_fault_latched_mask_ = 0;
   uint8_t dm_offline_latched_mask_ = 0;
   uint8_t dm_disabled_latched_mask_ = 0;

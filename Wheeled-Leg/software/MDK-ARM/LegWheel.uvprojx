@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>USE_HAL_DRIVER,STM32H723xx,ARM_MATH_CM7,USE_PWR_LDO_SUPPLY</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Devices/WS2812;../Bsp/UART;../Devices/IBUS;../Applications;../Algorithm;../Bsp/DWT;../Algorithm/inc;../Devices/IMU;../Drivers/CMSIS/DSP;../Devices/Saber_C3;../Devices/M1505B;../Bsp/CAN;../Middlewares/ST/ARM/DSP/Inc;../Devices/SBUS;../Devices/M6020;../Devices/DM8009P;../Devices/M3508;../Devices/tpid;../Devices/VOFA+;../Devices/N100;../Devices/dji_motor;../Devices/GM6020;../Devices/M2006;../Devices/XRobot_IMU;../Devices/DM_IMU</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc;../Drivers/STM32H7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2;../Middlewares/Third_Party/FreeRTOS/Source/portable/RVDS/ARM_CM4F;../Drivers/CMSIS/Device/ST/STM32H7xx/Include;../Drivers/CMSIS/Include;../Devices/WS2812;../Bsp/UART;../Devices/IBUS;..\Applications\inc;../Algorithm;../Bsp/DWT;../Algorithm/inc;../Devices/IMU;../Drivers/CMSIS/DSP;../Devices/Saber_C3;../Devices/M1505B;..\Bsp\inc;../Middlewares/ST/ARM/DSP/Inc;../Devices/SBUS;../Devices/M6020;../Devices/DM8009P;../Devices/M3508;../Devices/tpid;../Devices/VOFA+;../Devices/N100;../Devices/dji_motor;../Devices/GM6020;../Devices/M2006;../Devices/XRobot_IMU;..\Devices\inc;..\Devices\SDM02</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -1073,54 +1073,54 @@
           <GroupName>Applications</GroupName>
           <Files>
             <File>
-              <FileName>Chassis.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Applications\Chassis.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>Chassis.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Applications\Chassis.h</FilePath>
-            </File>
-            <File>
-              <FileName>Task_manager.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Applications\Task_manager.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>Task_manager.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Applications\Task_manager.h</FilePath>
-            </File>
-            <File>
               <FileName>ins.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Applications\ins.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>ins.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Applications\ins.h</FilePath>
-            </File>
-            <File>
-              <FileName>board_comm.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Applications\board_comm.h</FilePath>
-            </File>
-            <File>
-              <FileName>Cloud.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Applications\Cloud.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>Cloud.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Applications\Cloud.h</FilePath>
+              <FilePath>..\Applications\src\ins.cpp</FilePath>
             </File>
             <File>
               <FileName>board_comm.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Applications\board_comm.cpp</FilePath>
+              <FilePath>..\Applications\src\board_comm.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>Cloud.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Applications\src\Cloud.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>Task_manager.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Applications\src\Task_manager.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>Chassis.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Applications\src\Chassis.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>Chassis.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Applications\inc\Chassis.h</FilePath>
+            </File>
+            <File>
+              <FileName>Task_manager.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Applications\inc\Task_manager.h</FilePath>
+            </File>
+            <File>
+              <FileName>ins.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Applications\inc\ins.h</FilePath>
+            </File>
+            <File>
+              <FileName>board_comm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Applications\inc\board_comm.h</FilePath>
+            </File>
+            <File>
+              <FileName>Cloud.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Applications\inc\Cloud.h</FilePath>
             </File>
           </Files>
         </Group>
@@ -1232,110 +1232,140 @@
               <FileType>8</FileType>
               <FilePath>..\Algorithm\src\lqr_coeffs.cpp</FilePath>
             </File>
+            <File>
+              <FileName>leso.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\inc\leso.h</FilePath>
+            </File>
+            <File>
+              <FileName>leso.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\src\leso.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>leso_coeffs.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Algorithm\inc\leso_coeffs.h</FilePath>
+            </File>
+            <File>
+              <FileName>leso_coeffs.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Algorithm\src\leso_coeffs.cpp</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
           <GroupName>Devices</GroupName>
           <Files>
             <File>
-              <FileName>Saber_C3.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\Saber_C3\Saber_C3.c</FilePath>
-            </File>
-            <File>
-              <FileName>Saber_C3.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\Saber_C3\Saber_C3.h</FilePath>
-            </File>
-            <File>
-              <FileName>ws2812.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\WS2812\ws2812.c</FilePath>
-            </File>
-            <File>
-              <FileName>ws2812.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\WS2812\ws2812.h</FilePath>
-            </File>
-            <File>
-              <FileName>DM_8009P.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Devices\DM8009P\DM_8009P.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>DM_8009P.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\DM8009P\DM_8009P.h</FilePath>
-            </File>
-            <File>
-              <FileName>vofa.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\VOFA+\vofa.c</FilePath>
-            </File>
-            <File>
-              <FileName>vofa.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\VOFA+\vofa.h</FilePath>
-            </File>
-            <File>
-              <FileName>N100.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\N100\N100.c</FilePath>
-            </File>
-            <File>
-              <FileName>N100.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\N100\N100.h</FilePath>
-            </File>
-            <File>
-              <FileName>SBUS.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\SBUS\SBUS.c</FilePath>
-            </File>
-            <File>
-              <FileName>SBUS.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\SBUS\SBUS.h</FilePath>
-            </File>
-            <File>
-              <FileName>GM6020.cpp</FileName>
-              <FileType>8</FileType>
-              <FilePath>..\Devices\GM6020\GM6020.cpp</FilePath>
-            </File>
-            <File>
-              <FileName>GM6020.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\GM6020\GM6020.h</FilePath>
-            </File>
-            <File>
-              <FileName>XRobot_IMU.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Devices\XRobot_IMU\XRobot_IMU.c</FilePath>
-            </File>
-            <File>
-              <FileName>XRobot_IMU.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Devices\XRobot_IMU\XRobot_IMU.h</FilePath>
-            </File>
-            <File>
               <FileName>dm_imu.c</FileName>
               <FileType>1</FileType>
-              <FilePath>..\Devices\DM_IMU\dm_imu.c</FilePath>
+              <FilePath>..\Devices\src\dm_imu.c</FilePath>
             </File>
             <File>
               <FileName>dm_imu.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Devices\DM_IMU\dm_imu.h</FilePath>
+              <FilePath>..\Devices\inc\dm_imu.h</FilePath>
             </File>
             <File>
-              <FileName>M3508.cpp</FileName>
+              <FileName>GM6020.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\GM6020.h</FilePath>
+            </File>
+            <File>
+              <FileName>GM6020.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Devices\M3508\M3508.cpp</FilePath>
+              <FilePath>..\Devices\src\GM6020.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>DM_8009P.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Devices\src\DM_8009P.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>DM_8009P.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\DM_8009P.h</FilePath>
             </File>
             <File>
               <FileName>M3508.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Devices\M3508\M3508.h</FilePath>
+              <FilePath>..\Devices\inc\M3508.h</FilePath>
+            </File>
+            <File>
+              <FileName>M3508.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\Devices\src\M3508.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>N100.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\N100.h</FilePath>
+            </File>
+            <File>
+              <FileName>N100.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\N100.c</FilePath>
+            </File>
+            <File>
+              <FileName>Saber_C3.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\Saber_C3.h</FilePath>
+            </File>
+            <File>
+              <FileName>Saber_C3.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\Saber_C3.c</FilePath>
+            </File>
+            <File>
+              <FileName>SBUS.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\SBUS.h</FilePath>
+            </File>
+            <File>
+              <FileName>SBUS.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\SBUS.c</FilePath>
+            </File>
+            <File>
+              <FileName>SDM02.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\SDM02.h</FilePath>
+            </File>
+            <File>
+              <FileName>SDM02.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\SDM02.c</FilePath>
+            </File>
+            <File>
+              <FileName>vofa.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\vofa.h</FilePath>
+            </File>
+            <File>
+              <FileName>vofa.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\vofa.c</FilePath>
+            </File>
+            <File>
+              <FileName>ws2812.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\ws2812.h</FilePath>
+            </File>
+            <File>
+              <FileName>ws2812.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\ws2812.c</FilePath>
+            </File>
+            <File>
+              <FileName>XRobot_IMU.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Devices\inc\XRobot_IMU.h</FilePath>
+            </File>
+            <File>
+              <FileName>XRobot_IMU.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Devices\src\XRobot_IMU.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -1343,34 +1373,34 @@
           <GroupName>BSP</GroupName>
           <Files>
             <File>
-              <FileName>bsp_dwt.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Bsp\DWT\bsp_dwt.c</FilePath>
-            </File>
-            <File>
-              <FileName>bsp_dwt.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Bsp\DWT\bsp_dwt.h</FilePath>
-            </File>
-            <File>
               <FileName>BSP_fdcan.h</FileName>
               <FileType>5</FileType>
-              <FilePath>..\Bsp\CAN\BSP_fdcan.h</FilePath>
-            </File>
-            <File>
-              <FileName>bsp_uart.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Bsp\UART\bsp_uart.c</FilePath>
-            </File>
-            <File>
-              <FileName>bsp_uart.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>..\Bsp\UART\bsp_uart.h</FilePath>
+              <FilePath>..\Bsp\inc\BSP_fdcan.h</FilePath>
             </File>
             <File>
               <FileName>BSP_fdcan.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\Bsp\CAN\BSP_fdcan.cpp</FilePath>
+              <FilePath>..\Bsp\src\BSP_fdcan.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_dwt.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Bsp\inc\bsp_dwt.h</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_dwt.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\bsp_dwt.c</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_uart.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Bsp\inc\bsp_uart.h</FilePath>
+            </File>
+            <File>
+              <FileName>bsp_uart.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Bsp\src\bsp_uart.c</FilePath>
             </File>
           </Files>
         </Group>

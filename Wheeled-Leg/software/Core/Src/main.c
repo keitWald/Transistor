@@ -31,6 +31,7 @@
 /* USER CODE BEGIN Includes */
 #include "BSP_fdcan.h"
 #include "N100.h"
+#include "SDM02.h"
 #include "Task_manager.h"
 #include "arm_math.h"
 #include "bsp_dwt.h"
@@ -120,6 +121,7 @@ int main(void)
   SystemCoreClockUpdate();
   DWT_Init(SystemCoreClock / 1000000);
   Can_Fun.can_bsp_init();
+  (void)SDM02_Init();
   /* USER CODE END 2 */
 
   /* Init scheduler */

@@ -28,6 +28,40 @@ static void IMU_Param_Correction(IMU_Param_t* param, float gyro[3],
                                  float accel[3]);
 static void NormalizeQuaternion(float q[4]);
 
+static float LimitLeverArmYawRate(float yaw_rate) {
+  if (!isfinite(yaw_rate))
+    return 0.0f;
+  if (yaw_rate > INS_LEVER_ARM_YAW_RATE_MAX)
+    return INS_LEVER_ARM_YAW_RATE_MAX;
+  if (yaw_rate < -INS_LEVER_ARM_YAW_RATE_MAX)
+    return -INS_LEVER_ARM_YAW_RATE_MAX;
+  return yaw_rate;
+}
+
+float INS_CompensatePitchYawLeverArm(float raw_pitch, float yaw_rate,
+                                    float forward_offset_m) {
+  if (!isfinite(raw_pitch) || !isfinite(forward_offset_m))
+    return raw_pitch;
+  const float limited_yaw_rate = LimitLeverArmYawRate(yaw_rate);
+  const float centripetal_acceleration =
+      forward_offset_m * limited_yaw_rate * limited_yaw_rate;
+  const float apparent_pitch =
+      atan2f(centripetal_acceleration, STANDARD_GRAVITY);
+  return raw_pitch - apparent_pitch;
+}
+
+float INS_CompensateRollYawLeverArm(float raw_roll, float yaw_rate,
+                                   float lateral_offset_m) {
+  if (!isfinite(raw_roll) || !isfinite(lateral_offset_m))
+    return raw_roll;
+  const float limited_yaw_rate = LimitLeverArmYawRate(yaw_rate);
+  const float centripetal_acceleration =
+      lateral_offset_m * limited_yaw_rate * limited_yaw_rate;
+  const float apparent_roll =
+      atan2f(centripetal_acceleration, STANDARD_GRAVITY);
+  return raw_roll - apparent_roll;
+}
+
 
 
 void INS_Init(void) {
@@ -71,20 +105,21 @@ void INS_Task(void) {
   BodyFrameToEarthFrame(yb, INS.yn, INS.q);
   BodyFrameToEarthFrame(zb, INS.zn, INS.q);
   INS.Roll = AHRSData_Packet.Roll;
-  INS.Pitch = AHRSData_Packet.Pitch + pitch_bias;
+  INS.Pitch = AHRSData_Packet.Pitch;
   INS.Yaw = AHRSData_Packet.Heading;
   INS.YawSpeed = AHRSData_Packet.HeadingSpeed;
 #else
-  // dm_imu accel unit: g -> convert to m/s^2
+  // DM-IMU-L1 serial output already uses m/s^2 for acceleration.
   INS.Accel[X] = dm_imu.accel[0];
   INS.Accel[Y] = dm_imu.accel[1];
   INS.Accel[Z] = dm_imu.accel[2];
 
-  // dm_imu outputs angles / angular rates in degrees (deg, deg/s).
-  // Convert to radians (rad, rad/s) before feeding INS.
-  INS.Gyro[X] = dm_imu.gyro[0] * DEGREE_2_RAD;
-  INS.Gyro[Y] = dm_imu.gyro[1] * DEGREE_2_RAD;
-  INS.YawSpeed = INS.Gyro[Z] = dm_imu.gyro[2] * DEGREE_2_RAD;
+  // DM-IMU-L1 serial angular-rate output is already rad/s on every axis.
+  // Empirical X/Y rate gains are migrated in Chassis.h; model-based LQR/VMC/
+  // LESO paths and physical rate thresholds consume these SI values directly.
+  INS.Gyro[X] = dm_imu.gyro[0];
+  INS.Gyro[Y] = dm_imu.gyro[1];
+  INS.YawSpeed = INS.Gyro[Z] = dm_imu.gyro[2];
 
   INS.q[0] = dm_imu.quaternion[0];
   INS.q[1] = dm_imu.quaternion[1];
@@ -94,8 +129,11 @@ void INS_Task(void) {
   BodyFrameToEarthFrame(xb, INS.xn, INS.q);
   BodyFrameToEarthFrame(yb, INS.yn, INS.q);
   BodyFrameToEarthFrame(zb, INS.zn, INS.q);
-  INS.Roll = dm_imu.roll * DEGREE_2_RAD;
-  INS.Pitch = dm_imu.pitch * DEGREE_2_RAD + pitch_bias;
+  const float raw_roll = dm_imu.roll * DEGREE_2_RAD;
+  const float raw_pitch = dm_imu.pitch * DEGREE_2_RAD;
+  INS.Roll = raw_roll;
+  INS.Pitch = INS_CompensatePitchYawLeverArm(
+      raw_pitch, INS.YawSpeed, INS_IMU_FORWARD_LEVER_ARM_M);
   INS.Yaw = dm_imu.yaw * DEGREE_2_RAD;
 #endif
 

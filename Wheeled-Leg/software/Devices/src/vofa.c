@@ -2,7 +2,7 @@
 #include "stm32h7xx_hal_uart.h"
 #include "cmsis_os2.h"
 #include <stdbool.h>
-uint8_t vofaTxBuffer[100];
+uint8_t vofaTxBuffer[64];
 Vofa_t Vofa;
 
 // VOFA UART TX mutex: Vofa_JustFloat can be called from several tasks
@@ -84,7 +84,8 @@ void Vofa_JustFloat(float *_data, uint8_t _num) {
     memcpy(vofaTxBuffer + (_num * sizeof(float)), temp_end, sizeof(temp_end));
     const uint16_t tx_len =
         (uint16_t)((_num * sizeof(float)) + sizeof(temp_end));
-    if (HAL_UART_Transmit(&huart7, vofaTxBuffer, tx_len, 10U) != HAL_OK) {
+    /* 10 floats + tail take about 3.8 ms at 115200 baud; keep margin. */
+    if (HAL_UART_Transmit(&huart7, vofaTxBuffer, tx_len, 15U) != HAL_OK) {
       Vofa_UartErrorCallback(&huart7);
     }
     Vofa_TxUnlock();

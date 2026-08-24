@@ -54,6 +54,7 @@ typedef struct {
   float jump_flag;        // 跳跃开关两档（1→2 上升沿触发跳跃）
   float status_flag;      // Robot mode: 1=recover(自起), 2=normal(正常),
                           // 0/3=estop(急停)
+  float step_up_flag;     // 上台阶开关（1=低位/关闭，2=高位/使能）
   float reset_flag;       // 整车复位标志
   float torque;
 } SBUS_RevPack_t;

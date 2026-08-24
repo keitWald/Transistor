@@ -228,7 +228,7 @@ void MX_USART10_UART_Init(void)
   huart10.Init.WordLength = UART_WORDLENGTH_8B;
   huart10.Init.StopBits = UART_STOPBITS_1;
   huart10.Init.Parity = UART_PARITY_NONE;
-  huart10.Init.Mode = UART_MODE_TX; // VOFA 仅发送；关闭接收，避免悬浮 RX 引脚产生错误中断
+  huart10.Init.Mode = UART_MODE_TX_RX; // SDM02 uses USART10 full-duplex UART
   huart10.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart10.Init.OverSampling = UART_OVERSAMPLING_16;
   huart10.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
