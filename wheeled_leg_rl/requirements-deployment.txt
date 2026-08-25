@@ -1,3 +1,0 @@
-numpy
-onnxruntime
-# Install mujoco separately when using a MuJoCo adapter.
