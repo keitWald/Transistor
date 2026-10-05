@@ -1,6 +1,0 @@
-﻿*** Begin Patch
-*** Update File: software/Devices/VOFA+/vofa.c
-@@
--#include "stm32h7xx_hal_uart.h"
-+#include "stm32h7xx_hal_uart.h"
-*** End Patch
